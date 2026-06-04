@@ -42,3 +42,5 @@ slowapi==0.1.9
 openai>=1.0.0
 email-validator
 ollama>=0.6.2
+langchain-ollama>=1.1.0
+
