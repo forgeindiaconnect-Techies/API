@@ -186,7 +186,7 @@ async def read_dataset_context(dataset_id: str, db) -> str:
 async def check_ollama_health(current_user=Depends(get_current_user)):
     """Check connectivity to Ollama and list loaded models"""
     try:
-        client = AsyncClient(host=settings.OLLAMA_BASE_URL)
+        client = AsyncClient(host=settings.OLLAMA_BASE_URL, headers={"bypass-tunnel-reminder": "true"})
         models_list = await client.list()
         return {
             "status": "connected",
@@ -272,7 +272,7 @@ Answer:"""
     async def generate():
         assistant_content = ""
         try:
-            client = AsyncClient(host=settings.OLLAMA_BASE_URL)
+            client = AsyncClient(host=settings.OLLAMA_BASE_URL, headers={"bypass-tunnel-reminder": "true"})
             response_stream = await client.chat(
                 model=data.model or "llama3",
                 messages=history,
@@ -356,7 +356,7 @@ Answer:"""
 async def get_ollama_response(prompt: str, conv_id: str, db) -> str:
     """Non-streaming Ollama response using AsyncClient with OpenAI fallback"""
     try:
-        client = AsyncClient(host=settings.OLLAMA_BASE_URL)
+        client = AsyncClient(host=settings.OLLAMA_BASE_URL, headers={"bypass-tunnel-reminder": "true"})
         response = await client.chat(
             model="llama3",
             messages=[{"role": "user", "content": prompt}],

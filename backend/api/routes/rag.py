@@ -216,7 +216,7 @@ Answer:"""
     from ollama import AsyncClient
     from config import settings
     try:
-        client = AsyncClient(host=settings.OLLAMA_BASE_URL)
+        client = AsyncClient(host=settings.OLLAMA_BASE_URL, headers={"bypass-tunnel-reminder": "true"})
         res = await client.generate(
             model=data.model or "llama3",
             prompt=prompt,
