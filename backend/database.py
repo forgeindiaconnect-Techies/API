@@ -1,6 +1,9 @@
-from motor.motor_asyncio import AsyncIOMotorClient
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorCollection
 from pymongo import ASCENDING, DESCENDING
 from config import settings
+from bson import ObjectId
+from bson.errors import InvalidId
+from typing import Any
 import logging
 
 logger = logging.getLogger(__name__)
@@ -9,19 +12,94 @@ client: AsyncIOMotorClient = None
 db = None
 
 
+def convert_id(val: Any) -> Any:
+    if isinstance(val, str) and len(val) == 24:
+        try:
+            return ObjectId(val)
+        except InvalidId:
+            return val
+    elif isinstance(val, dict):
+        return {k: convert_id(v) for k, v in val.items()}
+    elif isinstance(val, list):
+        return [convert_id(x) for x in val]
+    return val
+
+
+def clean_query(query: Any) -> Any:
+    if not isinstance(query, dict):
+        return query
+    new_query = {}
+    for k, v in query.items():
+        if k == "_id":
+            new_query[k] = convert_id(v)
+        elif isinstance(v, dict):
+            new_query[k] = clean_query(v)
+        else:
+            new_query[k] = v
+    return new_query
+
+
+class CollectionWrapper:
+    def __init__(self, collection):
+        self._collection = collection
+
+    def __getattr__(self, name):
+        return getattr(self._collection, name)
+
+    async def insert_one(self, document, *args, **kwargs):
+        return await self._collection.insert_one(document, *args, **kwargs)
+
+    async def find_one(self, filter, *args, **kwargs):
+        return await self._collection.find_one(clean_query(filter), *args, **kwargs)
+
+    def find(self, filter=None, *args, **kwargs):
+        cleaned = clean_query(filter) if filter is not None else None
+        return self._collection.find(cleaned, *args, **kwargs)
+
+    async def update_one(self, filter, update, *args, **kwargs):
+        return await self._collection.update_one(clean_query(filter), update, *args, **kwargs)
+
+    async def update_many(self, filter, update, *args, **kwargs):
+        return await self._collection.update_many(clean_query(filter), update, *args, **kwargs)
+
+    async def delete_one(self, filter, *args, **kwargs):
+        return await self._collection.delete_one(clean_query(filter), *args, **kwargs)
+
+    async def delete_many(self, filter, *args, **kwargs):
+        return await self._collection.delete_many(clean_query(filter), *args, **kwargs)
+
+    async def count_documents(self, filter, *args, **kwargs):
+        return await self._collection.count_documents(clean_query(filter), *args, **kwargs)
+
+
+class DatabaseWrapper:
+    def __init__(self, db_obj):
+        self._db = db_obj
+
+    def __getattr__(self, name):
+        attr = getattr(self._db, name)
+        if isinstance(attr, AsyncIOMotorCollection) or attr.__class__.__name__ == "MockCollection":
+            return CollectionWrapper(attr)
+        return attr
+
+    def __getitem__(self, name):
+        return CollectionWrapper(self._db[name])
+
+
 async def connect_db():
     global client, db
     try:
         client = AsyncIOMotorClient(settings.MONGODB_URL)
-        db = client[settings.MONGODB_DB_NAME]
+        raw_db = client[settings.MONGODB_DB_NAME]
         # Ping to verify connection
-        await db.command("ping")
+        await raw_db.command("ping")
         logger.info(f"Connected to MongoDB: {settings.MONGODB_DB_NAME}")
+        db = DatabaseWrapper(raw_db)
         await create_indexes()
     except Exception as e:
         logger.warning(f"MongoDB connection failed: {e}. Using in-memory store.")
         # Fallback: use a simple dict store for development
-        db = MockDB()
+        db = DatabaseWrapper(MockDB())
 
 
 async def disconnect_db():
