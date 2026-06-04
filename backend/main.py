@@ -95,6 +95,15 @@ app.include_router(ai_router, prefix=PREFIX)
 
 # ─── Health & Info ────────────────────────────────────────────────────────────
 
+@app.get("/")
+async def root():
+    return {
+        "status": "healthy",
+        "message": "Personal AI Studio API is running",
+        "version": settings.APP_VERSION,
+    }
+
+
 @app.get("/api/health")
 async def health():
     return {
