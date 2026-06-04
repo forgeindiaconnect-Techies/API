@@ -134,7 +134,7 @@ export default function ChatPage() {
         }
       )
     } catch (err) {
-      toast.error('Connection lost')
+      toast.error(err.message || 'Connection lost')
       setStreaming(false)
     }
   }

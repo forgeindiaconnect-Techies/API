@@ -36,7 +36,7 @@ def fmt_dataset(d: dict) -> dict:
     }
 
 
-@router.get("/")
+@router.get("")
 async def list_datasets(current_user=Depends(get_current_user)):
     db = get_db()
     datasets = []

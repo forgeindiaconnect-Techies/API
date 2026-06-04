@@ -53,20 +53,106 @@ async def create_index(
 
 async def _build_index(index_id: str, config: dict, db):
     """Build vector index from dataset"""
-    import asyncio
     try:
-        # Simulate index building
-        await asyncio.sleep(3)
-        chunk_count = 200 + (hash(index_id) % 800)
-        await db.rag_indexes.update_one(
-            {"_id": index_id},
-            {"$set": {"status": "ready", "chunk_count": chunk_count}}
-        )
+        index_doc = await db.rag_indexes.find_one({"_id": index_id})
+        if not index_doc:
+            return
+        dataset_id = index_doc["dataset_id"]
+        dataset = await db.datasets.find_one({"_id": dataset_id})
+        if not dataset:
+            raise Exception("Dataset not found")
+
+        file_path = dataset.get("file_path")
+        file_type = dataset.get("file_type")
+
+        # 1. Extract text / rows
+        chunks = []
+        if file_type in ("csv", "xlsx", "xls"):
+            import pandas as pd
+            if file_type == "csv":
+                df = pd.read_csv(file_path)
+            else:
+                df = pd.read_excel(file_path)
+            for i, row in df.iterrows():
+                row_str = ", ".join([f"{col}: {val}" for col, val in row.items() if pd.notnull(val)])
+                chunks.append(row_str)
+        elif file_type == "pdf":
+            import PyPDF2
+            with open(file_path, "rb") as f:
+                reader = PyPDF2.PdfReader(f)
+                for page_num in range(len(reader.pages)):
+                    page_text = reader.pages[page_num].extract_text()
+                    if page_text:
+                        chunks.append(page_text)
+        elif file_type in ("txt", "md"):
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+            chunk_size = config.get("chunk_size", 512)
+            chunk_overlap = config.get("chunk_overlap", 50)
+            step = chunk_size - chunk_overlap
+            for i in range(0, len(text), step):
+                chunks.append(text[i:i+chunk_size])
+        else:
+            raise Exception(f"File type {file_type} not indexable for RAG")
+
+        # 2. Create embeddings & save to VectorStore
+        if chunks:
+            from vector_db.store import VectorStore, get_embedding_model
+            embedder = get_embedding_model(config.get("embedding_model", "all-MiniLM-L6-v2"))
+
+            embeddings = []
+            batch_size = 32
+            for i in range(0, len(chunks), batch_size):
+                batch = chunks[i:i+batch_size]
+                batch_embeds = embedder.encode(batch)
+                if hasattr(batch_embeds, "tolist"):
+                    batch_embeds = batch_embeds.tolist()
+                embeddings.extend(batch_embeds)
+
+            store = VectorStore(backend=config.get("index_type", "chroma"), collection_name=index_id)
+            metadatas = [{"source": dataset["name"], "chunk": idx} for idx in range(len(chunks))]
+            ids = [f"{index_id}_{idx}" for idx in range(len(chunks))]
+            store.add_documents(chunks, embeddings, metadatas, ids)
+
+            await db.rag_indexes.update_one(
+                {"_id": index_id},
+                {"$set": {"status": "ready", "chunk_count": len(chunks)}}
+            )
+        else:
+            raise Exception("No chunks extracted from dataset")
+
     except Exception as e:
+        logger.error(f"Failed to build index {index_id}: {e}")
         await db.rag_indexes.update_one(
             {"_id": index_id},
             {"$set": {"status": "error", "error": str(e)}}
         )
+
+
+async def query_vector_store(index_id: str, query: str, top_k: int, db) -> list:
+    index = await db.rag_indexes.find_one({"_id": index_id})
+    if not index:
+        return []
+
+    from vector_db.store import VectorStore, get_embedding_model
+    embedder = get_embedding_model(index.get("embedding_model", "all-MiniLM-L6-v2"))
+    query_emb = embedder.encode(query)
+    if hasattr(query_emb, "tolist"):
+        query_emb = query_emb.tolist()
+
+    store = VectorStore(backend=index.get("index_type", "chroma"), collection_name=index_id)
+    raw_results = store.query(query_emb, top_k=top_k)
+
+    from models import SearchResult
+    results = []
+    for r in raw_results:
+        results.append(SearchResult(
+            content=r["document"],
+            score=r["score"],
+            source=r["metadata"].get("source", "unknown"),
+            metadata=r["metadata"],
+        ))
+    return results
 
 
 @router.get("/indexes")
@@ -96,8 +182,7 @@ async def search(data: SearchRequest, current_user=Depends(get_current_user)):
     if index.get("status") != "ready":
         raise HTTPException(status_code=400, detail="Index not ready")
 
-    # Simulate vector search results
-    results = _simulate_search(data.query, data.top_k)
+    results = await query_vector_store(data.index_id, data.query, data.top_k, db)
     latency = round((time.time() - start) * 1000, 2)
 
     return SearchResponse(
@@ -116,23 +201,42 @@ async def rag_chat(data: RAGChatRequest, current_user=Depends(get_current_user))
         raise HTTPException(status_code=404, detail="Index not found")
 
     # Get relevant chunks
-    results = _simulate_search(data.question, data.top_k)
+    results = await query_vector_store(data.index_id, data.question, data.top_k, db)
 
     # Generate answer using context
     context = "\n\n".join([r.content for r in results])
-    answer = f"""Based on the retrieved documents, here is the answer to your question:
+    prompt = f"""Use the following pieces of context to answer the user question. If you do not know the answer, say you do not know.
 
-**Question:** {data.question}
+Context:
+{context}
 
-**Answer:** The information in your knowledge base indicates that this topic involves several key considerations. The retrieved context shows relevant details that help address your query comprehensively.
+Question: {data.question}
+Answer:"""
 
-*Sources used: {', '.join(set(r.source for r in results))}*"""
+    import httpx
+    from config import settings
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            res = await client.post(
+                f"{settings.OLLAMA_BASE_URL}/api/generate",
+                json={
+                    "model": data.model or "llama3",
+                    "prompt": prompt,
+                    "stream": False,
+                }
+            )
+            if res.status_code == 200:
+                answer = res.json().get("response", "")
+            else:
+                answer = f"Error from Ollama: {res.text}"
+    except Exception as e:
+        answer = f"Ollama is not running locally. Here is the retrieved document context:\n\n{context}\n\n(Note: Connect locally running Ollama model to generate a compiled response)"
 
     return {
         "answer": answer,
         "sources": results,
         "model": data.model,
-        "tokens_used": 342,
+        "tokens_used": len(answer.split()) + len(context.split()),
     }
 
 

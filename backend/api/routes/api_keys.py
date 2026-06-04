@@ -37,7 +37,7 @@ def fmt_key(k: dict, show_key: bool = False) -> dict:
     }
 
 
-@router.get("/")
+@router.get("")
 async def list_api_keys(current_user=Depends(get_current_user)):
     db = get_db()
     keys = []
@@ -46,7 +46,7 @@ async def list_api_keys(current_user=Depends(get_current_user)):
     return sorted(keys, key=lambda x: x["created_at"], reverse=True)
 
 
-@router.post("/")
+@router.post("")
 async def create_api_key(data: ApiKeyCreate, current_user=Depends(get_current_user)):
     db = get_db()
     full_key, prefix, key_hash = generate_api_key()

@@ -47,7 +47,7 @@ def fmt_job(j: dict) -> dict:
     }
 
 
-@router.get("/")
+@router.get("")
 async def list_models(current_user=Depends(get_current_user)):
     db = get_db()
     models = []

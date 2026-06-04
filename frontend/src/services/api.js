@@ -11,7 +11,10 @@ const api = axios.create({
 // Request interceptor
 api.interceptors.request.use((config) => {
   const { token } = useAuthStore.getState()
-  if (token) config.headers.Authorization = `Bearer ${token}`
+  if (token) {
+    config.headers = config.headers || {}
+    config.headers.Authorization = `Bearer ${token}`
+  }
   return config
 })
 
@@ -60,15 +63,20 @@ export const chatAPI = {
   getMessages: (id) => api.get(`/chat/conversations/${id}/messages`),
   sendMessage: (id, data) => api.post(`/chat/conversations/${id}/messages`, data),
   streamMessage: (id, data, onChunk, onDone) => {
-    const { token } = useAuthStore.getState()
-    return fetch(`${BASE_URL}/chat/conversations/${id}/stream`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify(data),
-    }).then(async (res) => {
+    const { token, refreshToken, setAuth, logout } = useAuthStore.getState()
+    
+    const executeFetch = (accessToken) => {
+      return fetch(`${BASE_URL}/chat/conversations/${id}/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify(data),
+      })
+    }
+
+    const handleStream = async (res) => {
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
       while (true) {
@@ -84,6 +92,33 @@ export const chatAPI = {
           }
         }
       }
+    }
+
+    return executeFetch(token).then(async (res) => {
+      if (res.status === 401 && refreshToken) {
+        try {
+          const refreshRes = await axios.post(`${BASE_URL}/auth/refresh`, {
+            refresh_token: refreshToken,
+          })
+          const newData = refreshRes.data
+          setAuth(newData.user, newData.access_token, newData.refresh_token)
+          const retriedRes = await executeFetch(newData.access_token)
+          if (!retriedRes.ok) {
+            throw new Error(`Streaming failed: HTTP ${retriedRes.status}`)
+          }
+          return handleStream(retriedRes)
+        } catch (refreshErr) {
+          logout()
+          throw new Error('Authentication expired. Please log in again.')
+        }
+      }
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '')
+        throw new Error(errText || `Request failed with status ${res.status}`)
+      }
+
+      return handleStream(res)
     })
   },
 }
