@@ -1,11 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 import json
 import asyncio
 import httpx
 import logging
+import os
+import pandas as pd
+import PyPDF2
 
 from models import (
     ConversationCreate, ConversationResponse,
@@ -129,13 +132,123 @@ async def send_message(
     return {"user": fmt_msg(user_msg), "assistant": fmt_msg(ai_msg)}
 
 
+async def read_dataset_context(dataset_id: str, db) -> str:
+    """Reads dataset text/metadata to feed directly as immediate context"""
+    dataset = await db.datasets.find_one({"_id": dataset_id})
+    if not dataset:
+        return ""
+    
+    file_path = dataset.get("file_path")
+    file_type = dataset.get("file_type")
+    if not file_path or not os.path.exists(file_path):
+        return ""
+        
+    try:
+        if file_type in ("txt", "md"):
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read(5000)
+            return content
+        elif file_type == "pdf":
+            text_parts = []
+            with open(file_path, "rb") as f:
+                reader = PyPDF2.PdfReader(f)
+                for i in range(min(5, len(reader.pages))):
+                    page_text = reader.pages[i].extract_text()
+                    if page_text:
+                        text_parts.append(page_text)
+                    if sum(len(p) for p in text_parts) > 5000:
+                        break
+            return "\n".join(text_parts)[:5000]
+        elif file_type in ("csv", "xlsx", "xls"):
+            if file_type == "csv":
+                df = pd.read_csv(file_path, nrows=50)
+            else:
+                df = pd.read_excel(file_path, nrows=50)
+            
+            rows_str = []
+            for _, row in df.iterrows():
+                row_text = ", ".join([f"{col}: {val}" for col, val in row.items() if pd.notnull(val)])
+                rows_str.append(row_text)
+            return "\n".join(rows_str)[:5000]
+        elif file_type == "json":
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read(5000)
+            return content
+        else:
+            return f"[File type .{file_type} not directly readable as raw text context]"
+    except Exception as e:
+        logger.error(f"Error reading dataset context for {dataset_id}: {e}")
+        return f"[Error loading context file: {str(e)}]"
+
+
 @router.post("/conversations/{conversation_id}/stream")
 async def stream_message(
     conversation_id: str,
     data: StreamRequest,
     current_user=Depends(get_current_user)
 ):
+    db = get_db()
+
+    # 1. Save user message immediately to DB
+    user_msg = {
+        "role": "user",
+        "content": data.content,
+        "conversation_id": conversation_id,
+        "user_id": str(current_user["_id"]),
+        "created_at": datetime.utcnow(),
+    }
+    await db.messages.insert_one(user_msg)
+
+    # 2. Build history
+    history = []
+    conv = await db.conversations.find_one({"_id": conversation_id})
+    if conv and conv.get("system_prompt"):
+        history.append({"role": "system", "content": conv["system_prompt"]})
+
+    messages_cursor = db.messages.find({"conversation_id": conversation_id}).sort("created_at", 1)
+    db_messages = []
+    async for m in messages_cursor:
+        db_messages.append(m)
+
+    # Context window sizing
+    context_window_size = data.context_window if data.context_window > 0 else 10
+    recent_messages = db_messages[-context_window_size:] if len(db_messages) > context_window_size else db_messages
+
+    # Add historical messages (excluding the last one which we will modify with context)
+    for m in recent_messages:
+        if m["_id"] == db_messages[-1]["_id"]:
+            continue
+        history.append({"role": m["role"], "content": m["content"]})
+
+    # 3. Fetch context if index_id (RAG) or dataset_id (File) is provided
+    latest_content = data.content
+    context_str = ""
+
+    if data.index_id:
+        try:
+            from api.routes.rag import query_vector_store
+            results = await query_vector_store(data.index_id, data.content, top_k=3, db=db)
+            if results:
+                context_str = "\n\n".join([f"[Source: {r.source}]\n{r.content}" for r in results])
+        except Exception as e:
+            logger.error(f"Error querying vector store: {e}")
+            context_str = f"[Error querying vector index: {str(e)}]"
+    elif data.dataset_id:
+        context_str = await read_dataset_context(data.dataset_id, db)
+
+    if context_str:
+        latest_content = f"""Use the following context to answer the question. If the context does not contain the answer, use your general knowledge but prioritize the context.
+
+Context:
+{context_str}
+
+Question: {data.content}
+Answer:"""
+
+    history.append({"role": "user", "content": latest_content})
+
     async def generate():
+        assistant_content = ""
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 async with client.stream(
@@ -143,7 +256,7 @@ async def stream_message(
                     f"{settings.OLLAMA_BASE_URL}/api/chat",
                     json={
                         "model": data.model or "llama3",
-                        "messages": [{"role": "user", "content": data.content}],
+                        "messages": history,
                         "stream": True,
                         "options": {
                             "temperature": data.temperature,
@@ -151,6 +264,14 @@ async def stream_message(
                         }
                     }
                 ) as response:
+                    if response.status_code != 200:
+                        err_text = await response.aread()
+                        err_msg = f"Ollama Error (HTTP {response.status_code}): {err_text.decode('utf-8', errors='ignore')}"
+                        logger.error(err_msg)
+                        yield f"data: {json.dumps({'token': f'Error calling model: {err_msg}'})}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+
                     async for line in response.aiter_lines():
                         if line:
                             try:
@@ -158,19 +279,40 @@ async def stream_message(
                                 if "message" in chunk:
                                     token = chunk["message"].get("content", "")
                                     if token:
+                                        assistant_content += token
                                         yield f"data: {json.dumps({'token': token})}\n\n"
                                 if chunk.get("done"):
-                                    yield "data: [DONE]\n\n"
-                                    return
+                                    break
                             except json.JSONDecodeError:
                                 pass
+
+            # 4. Save AI Response to MongoDB
+            if assistant_content:
+                ai_msg = {
+                    "role": "assistant",
+                    "content": assistant_content,
+                    "conversation_id": conversation_id,
+                    "user_id": str(current_user["_id"]),
+                    "created_at": datetime.utcnow(),
+                }
+                await db.messages.insert_one(ai_msg)
+
+                # Update conversation message count and updated_at
+                await db.conversations.update_one(
+                    {"_id": conversation_id},
+                    {"$set": {"updated_at": datetime.utcnow()}, "$inc": {"message_count": 2}}
+                )
+            yield "data: [DONE]\n\n"
+
+        except httpx.ConnectError:
+            err_msg = f"Connection Error: Local Ollama is offline at {settings.OLLAMA_BASE_URL}. Please start Ollama or verify it is running."
+            logger.error(err_msg)
+            yield f"data: {json.dumps({'token': err_msg})}\n\n"
+            yield "data: [DONE]\n\n"
         except Exception as e:
-            logger.error(f"Ollama streaming error: {e}")
-            # Fallback: simulate response
-            fallback = f"I understand your question about: {data.content[:50]}... Let me help you with that. This is a demo response since Ollama is not connected."
-            for word in fallback.split():
-                yield f"data: {json.dumps({'token': word + ' '})}\n\n"
-                await asyncio.sleep(0.05)
+            err_msg = f"Ollama streaming error: {str(e)}"
+            logger.error(err_msg)
+            yield f"data: {json.dumps({'token': f'System Error: {err_msg}'})}\n\n"
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")

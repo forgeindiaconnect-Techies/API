@@ -3,11 +3,11 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Send, Plus, Trash2, Bot, User, Copy, RefreshCw,
-  ChevronDown, Paperclip, Mic, Square
+  ChevronDown, Paperclip, Mic, Square, X
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import { useChatStore } from '../store'
-import { chatAPI } from '../services/api'
+import { chatAPI, ragAPI, datasetAPI } from '../services/api'
 import toast from 'react-hot-toast'
 
 const MODELS = [
@@ -28,6 +28,11 @@ export default function ChatPage() {
 
   const [input, setInput] = useState('')
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
+  const [contextMenuOpen, setContextMenuOpen] = useState(false)
+  const [indexes, setIndexes] = useState([])
+  const [datasets, setDatasets] = useState([])
+  const [selectedIndexId, setSelectedIndexId] = useState(null)
+  const [selectedDatasetId, setSelectedDatasetId] = useState(null)
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
 
@@ -46,6 +51,12 @@ export default function ChatPage() {
 
   useEffect(() => {
     fetchConversations()
+    ragAPI.listIndexes().then(({ data }) => {
+      setIndexes(data.filter(idx => idx.status === 'ready'))
+    }).catch(() => {})
+    datasetAPI.list().then(({ data }) => {
+      setDatasets(data.filter(ds => ds.status === 'ready'))
+    }).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -104,7 +115,14 @@ export default function ChatPage() {
     try {
       await chatAPI.streamMessage(
         activeId,
-        { content: text, model: selectedModel, temperature: 0.7, max_tokens: 2048 },
+        {
+          content: text,
+          model: selectedModel,
+          temperature: 0.7,
+          max_tokens: 2048,
+          index_id: selectedIndexId || undefined,
+          dataset_id: selectedDatasetId || undefined
+        },
         (chunk) => {
           if (chunk.token) {
             appendToLastMessage(activeId, chunk.token)
@@ -207,42 +225,167 @@ export default function ChatPage() {
             </span>
           </div>
 
-          {/* Model selector */}
-          <div className="relative">
-            <button
-              onClick={() => setModelMenuOpen(!modelMenuOpen)}
-              className="btn-ghost py-1.5 text-xs"
-            >
-              {MODELS.find(m => m.id === selectedModel)?.label || 'Llama 3'}
-              <ChevronDown size={12} />
-            </button>
-            <AnimatePresence>
-              {modelMenuOpen && (
-                <motion.div
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: 4 }}
-                  className="absolute right-0 top-full mt-1 w-40 rounded-lg overflow-hidden z-50"
-                  style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}
-                >
-                  {MODELS.map((m) => (
+          {/* Context & Model selector */}
+          <div className="flex gap-2 relative">
+            {/* Context Dropdown */}
+            <div className="relative">
+              <button
+                onClick={() => {
+                  setContextMenuOpen(!contextMenuOpen)
+                  setModelMenuOpen(false)
+                }}
+                className="btn-ghost py-1.5 px-2.5 text-xs flex items-center gap-1.5"
+                style={{
+                  border: (selectedIndexId || selectedDatasetId) ? '1px solid var(--accent-primary)' : '1px solid transparent',
+                  background: (selectedIndexId || selectedDatasetId) ? 'var(--accent-muted)' : 'transparent'
+                }}
+              >
+                <Paperclip size={12} style={{ color: (selectedIndexId || selectedDatasetId) ? 'var(--accent-primary)' : 'var(--text-muted)' }} />
+                <span className="max-w-[120px] truncate">
+                  {selectedIndexId 
+                    ? `Index: ${indexes.find(i => i.id === selectedIndexId)?.name || 'Selected'}`
+                    : selectedDatasetId
+                      ? `File: ${datasets.find(d => d.id === selectedDatasetId)?.name || 'Selected'}`
+                      : 'Add Context'}
+                </span>
+                <ChevronDown size={12} />
+              </button>
+              <AnimatePresence>
+                {contextMenuOpen && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 4 }}
+                    className="absolute right-0 top-full mt-1 w-64 rounded-lg overflow-hidden z-50 p-1"
+                    style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}
+                  >
+                    <div className="text-[10px] font-bold px-2 py-1 text-slate-400 uppercase tracking-wider">
+                      Grounding Context
+                    </div>
+                    
                     <button
-                      key={m.id}
-                      onClick={() => { setModel(m.id); setModelMenuOpen(false) }}
-                      className="w-full text-left px-3 py-2 text-xs transition-colors"
-                      style={{
-                        color: selectedModel === m.id ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                        background: selectedModel === m.id ? 'var(--accent-muted)' : 'transparent'
+                      onClick={() => {
+                        setSelectedIndexId(null)
+                        setSelectedDatasetId(null)
+                        setContextMenuOpen(false)
                       }}
-                      onMouseEnter={(e) => { if (selectedModel !== m.id) e.currentTarget.style.background = 'var(--bg-tertiary)' }}
-                      onMouseLeave={(e) => { if (selectedModel !== m.id) e.currentTarget.style.background = 'transparent' }}
+                      className="w-full text-left px-3.5 py-1.5 text-xs rounded transition-colors flex items-center justify-between"
+                      style={{
+                        color: (!selectedIndexId && !selectedDatasetId) ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                        background: (!selectedIndexId && !selectedDatasetId) ? 'var(--accent-muted)' : 'transparent'
+                      }}
+                      onMouseEnter={(e) => { if (selectedIndexId || selectedDatasetId) e.currentTarget.style.background = 'var(--bg-tertiary)' }}
+                      onMouseLeave={(e) => { if (selectedIndexId || selectedDatasetId) e.currentTarget.style.background = 'transparent' }}
                     >
-                      {m.label}
+                      No Context (Default Chat)
                     </button>
-                  ))}
-                </motion.div>
-              )}
-            </AnimatePresence>
+
+                    {indexes.length > 0 && (
+                      <>
+                        <div className="border-t border-slate-700/50 my-1"></div>
+                        <div className="text-[10px] font-bold px-2 py-1 text-indigo-400 uppercase tracking-wider">
+                          Vector Indexes (RAG)
+                        </div>
+                        {indexes.map((idx) => (
+                          <button
+                            key={idx.id}
+                            onClick={() => {
+                              setSelectedIndexId(idx.id)
+                              setSelectedDatasetId(null)
+                              setContextMenuOpen(false)
+                            }}
+                            className="w-full text-left px-3.5 py-1.5 text-xs rounded transition-colors truncate"
+                            style={{
+                              color: selectedIndexId === idx.id ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                              background: selectedIndexId === idx.id ? 'var(--accent-muted)' : 'transparent'
+                            }}
+                            onMouseEnter={(e) => { if (selectedIndexId !== idx.id) e.currentTarget.style.background = 'var(--bg-tertiary)' }}
+                            onMouseLeave={(e) => { if (selectedIndexId !== idx.id) e.currentTarget.style.background = 'transparent' }}
+                          >
+                            KB: {idx.name} ({idx.chunk_count} chunks)
+                          </button>
+                        ))}
+                      </>
+                    )}
+
+                    {datasets.length > 0 && (
+                      <>
+                        <div className="border-t border-slate-700/50 my-1"></div>
+                        <div className="text-[10px] font-bold px-2 py-1 text-emerald-400 uppercase tracking-wider">
+                          Uploaded Datasets (File)
+                        </div>
+                        {datasets.map((ds) => (
+                          <button
+                            key={ds.id}
+                            onClick={() => {
+                              setSelectedDatasetId(ds.id)
+                              setSelectedIndexId(null)
+                              setContextMenuOpen(false)
+                            }}
+                            className="w-full text-left px-3.5 py-1.5 text-xs rounded transition-colors truncate"
+                            style={{
+                              color: selectedDatasetId === ds.id ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                              background: selectedDatasetId === ds.id ? 'var(--accent-muted)' : 'transparent'
+                            }}
+                            onMouseEnter={(e) => { if (selectedDatasetId !== ds.id) e.currentTarget.style.background = 'var(--bg-tertiary)' }}
+                            onMouseLeave={(e) => { if (selectedDatasetId !== ds.id) e.currentTarget.style.background = 'transparent' }}
+                          >
+                            File: {ds.name}
+                          </button>
+                        ))}
+                      </>
+                    )}
+                    
+                    {indexes.length === 0 && datasets.length === 0 && (
+                      <div className="text-[11px] text-slate-500 italic px-3 py-2 text-center">
+                        No datasets or vector indexes available.
+                      </div>
+                    )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+
+            {/* Model selector */}
+            <div className="relative">
+              <button
+                onClick={() => {
+                  setModelMenuOpen(!modelMenuOpen)
+                  setContextMenuOpen(false)
+                }}
+                className="btn-ghost py-1.5 text-xs"
+              >
+                {MODELS.find(m => m.id === selectedModel)?.label || 'Llama 3'}
+                <ChevronDown size={12} />
+              </button>
+              <AnimatePresence>
+                {modelMenuOpen && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 4 }}
+                    className="absolute right-0 top-full mt-1 w-40 rounded-lg overflow-hidden z-50"
+                    style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}
+                  >
+                    {MODELS.map((m) => (
+                      <button
+                        key={m.id}
+                        onClick={() => { setModel(m.id); setModelMenuOpen(false) }}
+                        className="w-full text-left px-3 py-2 text-xs transition-colors"
+                        style={{
+                          color: selectedModel === m.id ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                          background: selectedModel === m.id ? 'var(--accent-muted)' : 'transparent'
+                        }}
+                        onMouseEnter={(e) => { if (selectedModel !== m.id) e.currentTarget.style.background = 'var(--bg-tertiary)' }}
+                        onMouseLeave={(e) => { if (selectedModel !== m.id) e.currentTarget.style.background = 'transparent' }}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
           </div>
         </div>
 
@@ -307,6 +450,34 @@ export default function ChatPage() {
           )}
           <div ref={messagesEndRef} />
         </div>
+
+        {/* Active Context Banner */}
+        {(selectedIndexId || selectedDatasetId) && (
+          <div className="px-4 py-2 flex items-center justify-between text-xs transition-all"
+            style={{ background: 'var(--bg-secondary)', borderTop: '1px solid var(--border)' }}>
+            <div className="flex items-center gap-1.5 text-slate-400">
+              <span className="w-1.5 h-1.5 rounded-full animate-pulse"
+                style={{ background: selectedIndexId ? '#6366f1' : '#10b981' }} />
+              <span>
+                Using grounding context from{' '}
+                <strong style={{ color: 'var(--text-primary)' }}>
+                  {selectedIndexId
+                    ? `RAG Index: ${indexes.find(i => i.id === selectedIndexId)?.name}`
+                    : `Dataset: ${datasets.find(d => d.id === selectedDatasetId)?.name}`}
+                </strong>
+              </span>
+            </div>
+            <button
+              onClick={() => {
+                setSelectedIndexId(null)
+                setSelectedDatasetId(null)
+              }}
+              className="text-slate-500 hover:text-slate-300 p-0.5 rounded-full hover:bg-slate-700/30 transition-colors"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        )}
 
         {/* Input */}
         <div className="p-4 flex-shrink-0" style={{ borderTop: '1px solid var(--border)' }}>

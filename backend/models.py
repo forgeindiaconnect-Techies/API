@@ -116,6 +116,9 @@ class StreamRequest(BaseModel):
     temperature: float = 0.7
     max_tokens: int = 2048
     context_window: int = 10
+    index_id: Optional[str] = None
+    dataset_id: Optional[str] = None
+
 
 
 # ─── Datasets ─────────────────────────────────────────────────────────────────
