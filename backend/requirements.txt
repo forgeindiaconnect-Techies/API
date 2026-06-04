@@ -41,3 +41,4 @@ sse-starlette==1.8.2
 slowapi==0.1.9
 openai>=1.0.0
 email-validator
+ollama>=0.6.2

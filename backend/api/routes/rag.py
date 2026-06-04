@@ -213,24 +213,18 @@ Context:
 Question: {data.question}
 Answer:"""
 
-    import httpx
+    from ollama import AsyncClient
     from config import settings
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            res = await client.post(
-                f"{settings.OLLAMA_BASE_URL}/api/generate",
-                json={
-                    "model": data.model or "llama3",
-                    "prompt": prompt,
-                    "stream": False,
-                }
-            )
-            if res.status_code == 200:
-                answer = res.json().get("response", "")
-            else:
-                answer = f"Error from Ollama: {res.text}"
+        client = AsyncClient(host=settings.OLLAMA_BASE_URL)
+        res = await client.generate(
+            model=data.model or "llama3",
+            prompt=prompt,
+            stream=False
+        )
+        answer = res.get("response", "")
     except Exception as e:
-        answer = f"Ollama is not running locally. Here is the retrieved document context:\n\n{context}\n\n(Note: Connect locally running Ollama model to generate a compiled response)"
+        answer = f"Ollama is not running locally. Details: {str(e)}\n\nHere is the retrieved document context:\n\n{context}\n\n(Note: Connect locally running Ollama model to generate a compiled response)"
 
     return {
         "answer": answer,

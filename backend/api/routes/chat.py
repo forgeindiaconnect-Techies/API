@@ -9,6 +9,7 @@ import logging
 import os
 import pandas as pd
 import PyPDF2
+from ollama import AsyncClient
 
 from models import (
     ConversationCreate, ConversationResponse,
@@ -250,41 +251,23 @@ Answer:"""
     async def generate():
         assistant_content = ""
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                async with client.stream(
-                    "POST",
-                    f"{settings.OLLAMA_BASE_URL}/api/chat",
-                    json={
-                        "model": data.model or "llama3",
-                        "messages": history,
-                        "stream": True,
-                        "options": {
-                            "temperature": data.temperature,
-                            "num_predict": data.max_tokens,
-                        }
-                    }
-                ) as response:
-                    if response.status_code != 200:
-                        err_text = await response.aread()
-                        err_msg = f"Ollama Error (HTTP {response.status_code}): {err_text.decode('utf-8', errors='ignore')}"
-                        logger.error(err_msg)
-                        yield f"data: {json.dumps({'token': f'Error calling model: {err_msg}'})}\n\n"
-                        yield "data: [DONE]\n\n"
-                        return
+            client = AsyncClient(host=settings.OLLAMA_BASE_URL)
+            response_stream = await client.chat(
+                model=data.model or "llama3",
+                messages=history,
+                stream=True,
+                options={
+                    "temperature": data.temperature,
+                    "num_predict": data.max_tokens,
+                }
+            )
 
-                    async for line in response.aiter_lines():
-                        if line:
-                            try:
-                                chunk = json.loads(line)
-                                if "message" in chunk:
-                                    token = chunk["message"].get("content", "")
-                                    if token:
-                                        assistant_content += token
-                                        yield f"data: {json.dumps({'token': token})}\n\n"
-                                if chunk.get("done"):
-                                    break
-                            except json.JSONDecodeError:
-                                pass
+            async for chunk in response_stream:
+                if "message" in chunk:
+                    token = chunk["message"].get("content", "")
+                    if token:
+                        assistant_content += token
+                        yield f"data: {json.dumps({'token': token})}\n\n"
 
             # 4. Save AI Response to MongoDB
             if assistant_content:
@@ -304,37 +287,31 @@ Answer:"""
                 )
             yield "data: [DONE]\n\n"
 
-        except httpx.ConnectError:
-            err_msg = f"Connection Error: Local Ollama is offline at {settings.OLLAMA_BASE_URL}. Please start Ollama or verify it is running."
-            logger.error(err_msg)
-            yield f"data: {json.dumps({'token': err_msg})}\n\n"
-            yield "data: [DONE]\n\n"
         except Exception as e:
-            err_msg = f"Ollama streaming error: {str(e)}"
-            logger.error(err_msg)
-            yield f"data: {json.dumps({'token': f'System Error: {err_msg}'})}\n\n"
+            err_str = str(e)
+            logger.error(f"Ollama streaming error: {err_str}")
+            if "ConnectionRefusedError" in err_str or "ConnectError" in err_str or "connect" in err_str.lower():
+                err_msg = f"Connection Error: Local Ollama is offline at {settings.OLLAMA_BASE_URL}. Please start Ollama or verify it is running."
+            elif "not found" in err_str.lower():
+                err_msg = f"Model Error: Selected model '{data.model or 'llama3'}' was not found. Run 'ollama pull {data.model or 'llama3'}' to download it."
+            else:
+                err_msg = f"Ollama Error: {err_str}"
+            yield f"data: {json.dumps({'token': err_msg})}\n\n"
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 async def get_ollama_response(prompt: str, conv_id: str, db) -> str:
-    """Non-streaming Ollama response with fallback"""
+    """Non-streaming Ollama response using AsyncClient"""
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(
-                f"{settings.OLLAMA_BASE_URL}/api/chat",
-                json={
-                    "model": "llama3",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": False,
-                }
-            )
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("message", {}).get("content", "")
+        client = AsyncClient(host=settings.OLLAMA_BASE_URL)
+        response = await client.chat(
+            model="llama3",
+            messages=[{"role": "user", "content": prompt}],
+            stream=False
+        )
+        return response.get("message", {}).get("content", "")
     except Exception as e:
         logger.warning(f"Ollama not available: {e}")
-
-    # Fallback response
-    return f"Thank you for your message. I've received: '{prompt[:100]}'. This is a demo response - connect Ollama for full AI capability."
+        return f"Error: Local Ollama is offline or model is not loaded. Details: {str(e)}"
