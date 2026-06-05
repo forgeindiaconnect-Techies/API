@@ -186,11 +186,26 @@ async def _call_llm(
             if response.status_code == 200:
                 return response.json().get("response", "")
     except Exception as e:
-        logger.warning(f"LLM call failed: {e}")
+        logger.warning(f"Ollama LLM call failed in RAG pipeline: {e}. Trying OpenAI fallback...")
 
-    # Fallback
+    # Fallback to OpenAI if configured
+    if settings.OPENAI_API_KEY and not settings.OPENAI_API_KEY.startswith("sk-..."):
+        try:
+            from openai import AsyncOpenAI
+            openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+            res = await openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+                stream=False
+            )
+            return res.choices[0].message.content or ""
+        except Exception as openai_err:
+            logger.error(f"OpenAI fallback in RAG pipeline failed: {openai_err}")
+
+    # Final static fallback if all connections fail
     return (
         "Based on the retrieved context, I can provide the following answer: "
         "The documents contain relevant information about your query. "
-        "Please connect Ollama for full AI-powered answers."
+        "Please connect Ollama or configure an OpenAI API key for full AI-powered answers."
     )

@@ -126,10 +126,30 @@ async def summarize_text(data: SummarizeRequest, current_user=Depends(get_curren
                     "summary_length": len(result.get("response", "").split()),
                     "latency_ms": round((time.time() - start) * 1000, 2),
                 }
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Ollama summarization failed: {e}. Trying OpenAI fallback...")
 
-    # Fallback summary
+    # Fallback to OpenAI if configured
+    if settings.OPENAI_API_KEY and not settings.OPENAI_API_KEY.startswith("sk-..."):
+        try:
+            from openai import AsyncOpenAI
+            openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+            res = await openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": f"Summarize the following text in {data.style} style, max {data.max_length} words:\n\n{data.text}"}],
+                stream=False
+            )
+            summary_content = res.choices[0].message.content or ""
+            return {
+                "summary": summary_content,
+                "original_length": len(data.text.split()),
+                "summary_length": len(summary_content.split()),
+                "latency_ms": round((time.time() - start) * 1000, 2),
+            }
+        except Exception as openai_err:
+            logger.error(f"OpenAI fallback in summarization failed: {openai_err}")
+
+    # Final static fallback summary
     words = data.text.split()
     short = " ".join(words[:min(data.max_length // 2, len(words))]) + "..."
     return {
@@ -137,7 +157,7 @@ async def summarize_text(data: SummarizeRequest, current_user=Depends(get_curren
         "original_length": len(words),
         "summary_length": data.max_length // 2,
         "latency_ms": round((time.time() - start) * 1000, 2),
-        "note": "Connect Ollama for AI-powered summaries",
+        "note": "Connect Ollama or configure an OpenAI API key for AI-powered summaries",
     }
 
 
