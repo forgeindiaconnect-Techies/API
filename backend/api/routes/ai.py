@@ -109,7 +109,7 @@ async def summarize_text(data: SummarizeRequest, current_user=Depends(get_curren
     start = time.time()
     try:
         import httpx
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, headers={"bypass-tunnel-reminder": "true"}) as client:
             response = await client.post(
                 f"{settings.OLLAMA_BASE_URL}/api/generate",
                 json={

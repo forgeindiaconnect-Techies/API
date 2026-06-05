@@ -177,7 +177,7 @@ async def _call_llm(
     import httpx
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=60, headers={"bypass-tunnel-reminder": "true"}) as client:
             response = await client.post(
                 f"{settings.OLLAMA_BASE_URL}/api/generate",
                 json={"model": model, "prompt": prompt, "stream": False,
