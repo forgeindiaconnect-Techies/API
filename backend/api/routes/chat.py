@@ -245,18 +245,55 @@ async def stream_message(
     # 3. Fetch context if index_id (RAG) or dataset_id (File) is provided
     latest_content = data.content
     context_str = ""
+    results = []
 
     if data.index_id:
         try:
             from api.routes.rag import query_vector_store
             results = await query_vector_store(data.index_id, data.content, top_k=3, db=db)
-            if results:
-                context_str = "\n\n".join([f"[Source: {r.source}]\n{r.content}" for r in results])
         except Exception as e:
             logger.error(f"Error querying vector store: {e}")
-            context_str = f"[Error querying vector index: {str(e)}]"
     elif data.dataset_id:
-        context_str = await read_dataset_context(data.dataset_id, db)
+        try:
+            from api.routes.rag import query_vector_store
+            # Check if there is an index ready for this dataset
+            index = await db.rag_indexes.find_one({"dataset_id": data.dataset_id, "status": "ready"})
+            if index:
+                results = await query_vector_store(str(index["_id"]), data.content, top_k=3, db=db)
+            else:
+                # Local dynamic text search fallback if no index is ready
+                dataset = await db.datasets.find_one({"_id": data.dataset_id})
+                dataset_name = dataset.get("name", "grounding_doc") if dataset else "grounding_doc"
+                
+                text_content = await read_dataset_context(data.dataset_id, db)
+                if text_content:
+                    # Segment file into overlapping chunks
+                    chunks = [text_content[i:i+500] for i in range(0, len(text_content), 400)]
+                    query_words = [w.lower() for w in data.content.split() if len(w) > 3]
+                    matches = []
+                    for c in chunks:
+                        score = sum(1 for w in query_words if w in c.lower())
+                        if score > 0:
+                            matches.append((c, score))
+                    
+                    matches.sort(key=lambda x: x[1], reverse=True)
+                    
+                    from models import SearchResult
+                    results = [
+                        SearchResult(
+                            content=m[0].strip(),
+                            score=round(float(m[1] / max(1, len(query_words))), 2),
+                            source=dataset_name,
+                            metadata={"source": dataset_name}
+                        )
+                        for m in matches[:3]
+                    ]
+        except Exception as e:
+            logger.error(f"Error running dataset dynamic RAG search: {e}")
+
+    # Build grounding context with matched scores and file name citations
+    if results:
+        context_str = "\n\n".join([f"[Source: {r.source} (Similarity Score: {r.score})]\n{r.content}" for r in results])
 
     if context_str:
         latest_content = f"""Use the following context to answer the question. If the context does not contain the answer, use your general knowledge but prioritize the context.
@@ -320,17 +357,36 @@ Answer:"""
                             yield f"data: {json.dumps({'token': token})}\n\n"
 
                 except Exception as openai_err:
-                    err_msg = f"Connection Error: Local Ollama is offline, and OpenAI fallback failed: {str(openai_err)}"
-                    logger.error(err_msg)
-                    yield f"data: {json.dumps({'token': err_msg})}\n\n"
+                    logger.error(f"OpenAI fallback failed: {openai_err}")
+                    if results:
+                        fallback_msg = (
+                            "🤖 **Note: LLM server is currently offline. Here is the direct matching content retrieved from your dataset:**\n\n"
+                        )
+                        for idx, r in enumerate(results):
+                            fallback_msg += f"**Chunk {idx+1} (Source: `{r.source}`, Similarity Score: `{r.score}`)**:\n> {r.content}\n\n"
+                        assistant_content = fallback_msg
+                        yield f"data: {json.dumps({'token': fallback_msg})}\n\n"
+                    else:
+                        err_msg = f"Connection Error: LLM server is offline, and no grounding context is available. Details: {str(openai_err)}"
+                        yield f"data: {json.dumps({'token': err_msg})}\n\n"
             else:
-                if "ConnectionRefusedError" in err_str or "ConnectError" in err_str or "connect" in err_str.lower() or "attempts failed" in err_str.lower():
-                    err_msg = f"Connection Error: Local Ollama is offline at {settings.OLLAMA_BASE_URL}. Please start Ollama locally, or configure a valid OPENAI_API_KEY for automatic cloud fallback."
-                elif "not found" in err_str.lower():
-                    err_msg = f"Model Error: Selected model '{data.model or 'llama3'}' was not found. Run 'ollama pull {data.model or 'llama3'}' to download it."
+                # If no OpenAI configured and Ollama fails, use dataset content as direct output
+                if results:
+                    fallback_msg = (
+                        "🤖 **Note: LLM server is currently offline. Here is the direct matching content retrieved from your dataset:**\n\n"
+                    )
+                    for idx, r in enumerate(results):
+                        fallback_msg += f"**Chunk {idx+1} (Source: `{r.source}`, Similarity Score: `{r.score}`)**:\n> {r.content}\n\n"
+                    assistant_content = fallback_msg
+                    yield f"data: {json.dumps({'token': fallback_msg})}\n\n"
                 else:
-                    err_msg = f"Ollama Error: {err_str}"
-                yield f"data: {json.dumps({'token': err_msg})}\n\n"
+                    if "ConnectionRefusedError" in err_str or "ConnectError" in err_str or "connect" in err_str.lower() or "attempts failed" in err_str.lower() or "503" in err_str:
+                        err_msg = f"Connection Error: Local Ollama is offline at {settings.OLLAMA_BASE_URL}. Please start Ollama locally, or configure a valid OPENAI_API_KEY for automatic cloud fallback."
+                    elif "not found" in err_str.lower():
+                        err_msg = f"Model Error: Selected model '{data.model or 'llama3'}' was not found. Run 'ollama pull {data.model or 'llama3'}' to download it."
+                    else:
+                        err_msg = f"Ollama Error: {err_str}"
+                    yield f"data: {json.dumps({'token': err_msg})}\n\n"
 
         # 4. Save AI Response to MongoDB
         if assistant_content:
