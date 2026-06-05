@@ -28,6 +28,42 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("Starting Personal AI Studio API...")
     await connect_db()
+    
+    # RAG index startup recovery check
+    try:
+        from database import get_db
+        from vector_db.store import VectorStore
+        from api.routes.rag import _build_index
+        import asyncio
+
+        db = get_db()
+        if db is not None:
+            cursor = db.rag_indexes.find({"status": "ready"})
+            async for index in cursor:
+                index_id = str(index["_id"])
+                try:
+                    store = VectorStore(backend=index.get("index_type", "chroma"), collection_name=index_id)
+                    count = store.count()
+                    if count == 0:
+                        logger.info(f"RAG Index {index_id} is marked 'ready' in MongoDB but has 0 chunks in ChromaDB. Rebuilding...")
+                        # Set status to building
+                        await db.rag_indexes.update_one(
+                            {"_id": index["_id"]},
+                            {"$set": {"status": "building", "error": None}}
+                        )
+                        # Rebuild in background
+                        config = {
+                            "chunk_size": index.get("chunk_size", 512),
+                            "chunk_overlap": index.get("chunk_overlap", 50),
+                            "index_type": index.get("index_type", "chroma"),
+                            "embedding_model": index.get("embedding_model", "all-MiniLM-L6-v2"),
+                        }
+                        asyncio.create_task(_build_index(index_id, config, db))
+                except Exception as index_err:
+                    logger.error(f"Failed to check or trigger rebuild for RAG index {index_id}: {index_err}")
+    except Exception as startup_err:
+        logger.error(f"Error during RAG index startup recovery check: {startup_err}")
+
     yield
     logger.info("Shutting down...")
     await disconnect_db()

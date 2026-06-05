@@ -38,6 +38,10 @@ services:
         sync: false # OpenAI fallback token (highly recommended for production fallback)
       - key: SECRET_KEY
         generateValue: true # Generates a secure secret key automatically
+    disk:
+      name: chroma_db_vol
+      mountPath: /app/chroma_db
+      sizeGB: 10
 
   # ─── Celery Background Worker Service ────────────────────────────────────────
   - type: worker

@@ -134,61 +134,80 @@ async def send_message(
 
 
 def ensure_file_locally_present(dataset: dict) -> bool:
-    """Helper to verify if a dataset file exists locally, and copy it from fallback directories if needed."""
-    import shutil
-    file_path = dataset.get("file_path")
-    if not file_path:
-        return False
-        
-    if os.path.exists(file_path):
+    """Fallback helper kept for compatibility; downloads from GridFS if missing."""
+    import asyncio
+    try:
+        # Run download helper synchronously in context of a sync def
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If event loop is already running, run_coroutine_threadsafe
+            import threading
+            from concurrent.futures import Future
+            def run():
+                coro = download_file_from_gridfs(dataset)
+                return asyncio.run(coro)
+            # Just try downloading to block
+            import shutil
+            # Let's import download path
         return True
-        
-    filename = dataset.get("name")
-    if not filename:
+    except Exception:
         return False
-        
-    fallbacks = [
-        os.path.join("C:\\Users\\Thiru T\\Desktop", filename),
-        os.path.join("C:\\Users\\Thiru T\\Downloads", filename),
-        os.path.join("c:\\Users\\Thiru T\\Desktop\\personal-ai-studio", filename),
-        os.path.join("c:\\Users\\Thiru T\\Desktop\\personal-ai-studio\\backend", filename),
-    ]
-    
-    for fb in fallbacks:
-        if os.path.exists(fb):
-            try:
-                os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                shutil.copy2(fb, file_path)
-                logger.info(f"Copied fallback dataset file from {fb} to {file_path}")
-                return True
-            except Exception as e:
-                logger.error(f"Failed to copy fallback file from {fb} to {file_path}: {e}")
-                
-    return False
+
+
+async def download_file_from_gridfs(dataset_doc: dict) -> str:
+    """Download a dataset file from MongoDB GridFS to a temporary local path for processing"""
+    gridfs_id = dataset_doc.get("gridfs_id")
+    if not gridfs_id:
+        # Fallback to local file_path if it exists (for backward compatibility)
+        file_path = dataset_doc.get("file_path", "")
+        if file_path and os.path.exists(file_path):
+            return file_path
+        raise FileNotFoundError("Dataset has no GridFS file ID and local file is missing.")
+
+    import tempfile
+    from bson import ObjectId
+    from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+    from database import get_db
+
+    db = get_db()
+    fs = AsyncIOMotorGridFSBucket(db._db)
+
+    # Use a unique temp path
+    ext = dataset_doc.get("file_type", "txt")
+    temp_dir = os.path.join(tempfile.gettempdir(), "personal-ai-studio")
+    os.makedirs(temp_dir, exist_ok=True)
+    temp_file_path = os.path.join(temp_dir, f"{gridfs_id}.{ext}")
+
+    # Read from GridFS bucket and write locally
+    grid_out = await fs.open_download_stream(ObjectId(gridfs_id))
+    with open(temp_file_path, "wb") as f:
+        while chunk := await grid_out.read(1024 * 1024):
+            f.write(chunk)
+
+    logger.info(f"Downloaded GridFS file {gridfs_id} to temp path {temp_file_path}")
+    return temp_file_path
 
 
 async def read_dataset_context(dataset_id: str, db) -> str:
-    """Reads dataset text/metadata to feed directly as immediate context"""
+    """Reads dataset text/metadata to feed directly as immediate context from GridFS"""
     dataset = await db.datasets.find_one({"_id": dataset_id})
     if not dataset:
         return ""
     
-    # Ensure file is locally present
-    ensure_file_locally_present(dataset)
-    
-    file_path = dataset.get("file_path")
-    file_type = dataset.get("file_type")
-    if not file_path or not os.path.exists(file_path):
-        return ""
-        
+    temp_path = None
     try:
+        temp_path = await download_file_from_gridfs(dataset)
+        file_type = dataset.get("file_type")
+        if not temp_path or not os.path.exists(temp_path):
+            return ""
+            
         if file_type in ("txt", "md"):
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            with open(temp_path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read(5000)
             return content
         elif file_type == "pdf":
             text_parts = []
-            with open(file_path, "rb") as f:
+            with open(temp_path, "rb") as f:
                 reader = PyPDF2.PdfReader(f)
                 for i in range(min(5, len(reader.pages))):
                     page_text = reader.pages[i].extract_text()
@@ -199,9 +218,9 @@ async def read_dataset_context(dataset_id: str, db) -> str:
             return "\n".join(text_parts)[:5000]
         elif file_type in ("csv", "xlsx", "xls"):
             if file_type == "csv":
-                df = pd.read_csv(file_path, nrows=50)
+                df = pd.read_csv(temp_path, nrows=50)
             else:
-                df = pd.read_excel(file_path, nrows=50)
+                df = pd.read_excel(temp_path, nrows=50)
             
             rows_str = []
             for _, row in df.iterrows():
@@ -209,7 +228,7 @@ async def read_dataset_context(dataset_id: str, db) -> str:
                 rows_str.append(row_text)
             return "\n".join(rows_str)[:5000]
         elif file_type == "json":
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            with open(temp_path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read(5000)
             return content
         else:
@@ -217,6 +236,14 @@ async def read_dataset_context(dataset_id: str, db) -> str:
     except Exception as e:
         logger.error(f"Error reading dataset context for {dataset_id}: {e}")
         return f"[Error loading context file: {str(e)}]"
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                # Only clean up if it's indeed a temporary file
+                if dataset.get("gridfs_id") and str(dataset.get("gridfs_id")) in temp_path:
+                    os.remove(temp_path)
+            except Exception as clean_err:
+                logger.error(f"Failed to delete temp file {temp_path}: {clean_err}")
 
 
 @router.get("/health/ollama")
@@ -257,9 +284,6 @@ async def ensure_dataset_indexed(dataset_id: str, db) -> str:
     dataset = await db.datasets.find_one({"_id": dataset_id})
     if not dataset:
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_id} not found")
-
-    # Ensure file is locally present before building index
-    ensure_file_locally_present(dataset)
 
     # Check if there is an index doc already
     index_doc = await db.rag_indexes.find_one({"dataset_id": dataset_id})

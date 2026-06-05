@@ -60,18 +60,21 @@ async def upload_dataset(
 
     file_size = 0
     file_id = str(uuid.uuid4())
-    user_dir = os.path.join(settings.UPLOAD_DIR, str(current_user["_id"]))
-    os.makedirs(user_dir, exist_ok=True)
-    file_path = os.path.join(user_dir, f"{file_id}.{ext}")
 
     try:
-        with open(file_path, "wb") as f:
-            while chunk := await file.read(1024 * 1024):
-                file_size += len(chunk)
-                if file_size > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
-                    os.remove(file_path)
-                    raise HTTPException(status_code=413, detail="File too large")
-                f.write(chunk)
+        from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+        fs = AsyncIOMotorGridFSBucket(db._db)
+        grid_in = fs.open_upload_stream(file.filename)
+        
+        while chunk := await file.read(1024 * 1024):
+            file_size += len(chunk)
+            if file_size > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+                await grid_in.abort()
+                raise HTTPException(status_code=413, detail="File too large")
+            await grid_in.write(chunk)
+            
+        await grid_in.close()
+        gridfs_id = str(grid_in._id)
     except HTTPException:
         raise
     except Exception as e:
@@ -80,8 +83,9 @@ async def upload_dataset(
     doc = {
         "name": file.filename,
         "file_type": ext,
-        "file_path": file_path,
+        "file_path": f"./uploads/{file_id}.{ext}",
         "file_id": file_id,
+        "gridfs_id": gridfs_id,
         "size_bytes": file_size,
         "status": "processing",
         "user_id": str(current_user["_id"]),
@@ -95,7 +99,7 @@ async def upload_dataset(
     background_tasks.add_task(
         _process_in_background,
         str(result.inserted_id),
-        file_path,
+        doc["file_path"],
         ext,
         db
     )
@@ -104,8 +108,16 @@ async def upload_dataset(
 
 
 async def _process_in_background(dataset_id: str, file_path: str, ext: str, db):
+    temp_path = None
     try:
-        result = await process_dataset(file_path, ext)
+        dataset = await db.datasets.find_one({"_id": dataset_id})
+        if not dataset:
+            raise Exception("Dataset not found in DB")
+            
+        from api.routes.chat import download_file_from_gridfs
+        temp_path = await download_file_from_gridfs(dataset)
+        
+        result = await process_dataset(temp_path, ext)
         await db.datasets.update_one(
             {"_id": dataset_id},
             {"$set": {
@@ -123,6 +135,12 @@ async def _process_in_background(dataset_id: str, file_path: str, ext: str, db):
             {"_id": dataset_id},
             {"$set": {"status": "error", "error_message": str(e)}}
         )
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception as clean_err:
+                logger.error(f"Failed to delete temp file {temp_path}: {clean_err}")
 
 
 @router.get("/{dataset_id}")
@@ -141,9 +159,24 @@ async def delete_dataset(dataset_id: str, current_user=Depends(get_current_user)
     if not d:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    # Delete file
+    # Delete local file fallback if it exists
     if os.path.exists(d.get("file_path", "")):
-        os.remove(d["file_path"])
+        try:
+            os.remove(d["file_path"])
+        except Exception:
+            pass
+
+    # Delete from GridFS bucket
+    gridfs_id = d.get("gridfs_id")
+    if gridfs_id:
+        try:
+            from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+            from bson import ObjectId
+            fs = AsyncIOMotorGridFSBucket(db._db)
+            await fs.delete(ObjectId(gridfs_id))
+            logger.info(f"Deleted GridFS file {gridfs_id} for dataset {dataset_id}")
+        except Exception as e:
+            logger.error(f"Failed to delete GridFS file {gridfs_id}: {e}")
 
     await db.datasets.delete_one({"_id": dataset_id})
     return {"message": "Dataset deleted"}
@@ -177,8 +210,21 @@ async def get_eda(dataset_id: str, current_user=Depends(get_current_user)):
     if d.get("status") != "ready":
         raise HTTPException(status_code=400, detail="Dataset not processed yet")
 
-    eda = await run_eda(d.get("file_path", ""), d.get("file_type", ""))
-    return eda
+    temp_path = None
+    try:
+        from api.routes.chat import download_file_from_gridfs
+        temp_path = await download_file_from_gridfs(d)
+        eda = await run_eda(temp_path, d.get("file_type", ""))
+        return eda
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                if d.get("gridfs_id") and str(d.get("gridfs_id")) in temp_path:
+                    os.remove(temp_path)
+            except Exception as clean_err:
+                logger.error(f"Failed to delete temp file {temp_path}: {clean_err}")
 
 
 @router.get("/{dataset_id}/preview")
@@ -192,36 +238,39 @@ async def get_preview(
     if not d:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
+    temp_path = None
     try:
+        from api.routes.chat import download_file_from_gridfs
+        temp_path = await download_file_from_gridfs(d)
+        
         import pandas as pd
         ext = d["file_type"]
-        path = d.get("file_path", "")
-        if not os.path.exists(path):
+        if not os.path.exists(temp_path):
             return {"columns": [], "rows": []}
 
         if ext == "csv":
             df = None
             for enc in ["utf-8", "latin-1", "utf-8-sig", "cp1252"]:
                 try:
-                    df = pd.read_csv(path, nrows=rows, encoding=enc)
+                    df = pd.read_csv(temp_path, nrows=rows, encoding=enc)
                     break
                 except Exception:
                     continue
             if df is None:
-                df = pd.read_csv(path, nrows=rows)
+                df = pd.read_csv(temp_path, nrows=rows)
             return {
                 "columns": list(df.columns),
                 "rows": df.fillna("").head(rows).to_dict("records")
             }
         elif ext in ["xlsx", "xls"]:
-            df = pd.read_excel(path, nrows=rows)
+            df = pd.read_excel(temp_path, nrows=rows)
             return {
                 "columns": list(df.columns),
                 "rows": df.fillna("").head(rows).to_dict("records")
             }
         elif ext in ["txt", "md"]:
             lines = []
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            with open(temp_path, "r", encoding="utf-8", errors="ignore") as f:
                 for i in range(rows):
                     line = f.readline()
                     if not line:
@@ -234,7 +283,7 @@ async def get_preview(
         elif ext == "pdf":
             import PyPDF2
             pages = []
-            with open(path, "rb") as f:
+            with open(temp_path, "rb") as f:
                 reader = PyPDF2.PdfReader(f)
                 num_pages = min(len(reader.pages), rows)
                 for page_num in range(num_pages):
@@ -249,7 +298,7 @@ async def get_preview(
             }
         elif ext == "json":
             import json
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            with open(temp_path, "r", encoding="utf-8", errors="ignore") as f:
                 data = json.load(f)
             if isinstance(data, list):
                 if data and isinstance(data[0], dict):
@@ -277,3 +326,10 @@ async def get_preview(
             return {"columns": [], "rows": [], "message": f"Preview not available for file type .{ext}"}
     except Exception as e:
         return {"columns": [], "rows": [], "error": str(e)}
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                if d.get("gridfs_id") and str(d.get("gridfs_id")) in temp_path:
+                    os.remove(temp_path)
+            except Exception as clean_err:
+                logger.error(f"Failed to delete temp file {temp_path}: {clean_err}")

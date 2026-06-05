@@ -53,6 +53,8 @@ async def create_index(
 
 async def _build_index(index_id: str, config: dict, db):
     """Build vector index from dataset"""
+    temp_path = None
+    dataset = None
     try:
         index_doc = await db.rag_indexes.find_one({"_id": index_id})
         if not index_doc:
@@ -62,7 +64,10 @@ async def _build_index(index_id: str, config: dict, db):
         if not dataset:
             raise Exception("Dataset not found")
 
-        file_path = dataset.get("file_path")
+        from api.routes.chat import download_file_from_gridfs
+        import os
+
+        temp_path = await download_file_from_gridfs(dataset)
         file_type = dataset.get("file_type")
 
         # 1. Extract text / rows
@@ -70,22 +75,22 @@ async def _build_index(index_id: str, config: dict, db):
         if file_type in ("csv", "xlsx", "xls"):
             import pandas as pd
             if file_type == "csv":
-                df = pd.read_csv(file_path)
+                df = pd.read_csv(temp_path)
             else:
-                df = pd.read_excel(file_path)
+                df = pd.read_excel(temp_path)
             for i, row in df.iterrows():
                 row_str = ", ".join([f"{col}: {val}" for col, val in row.items() if pd.notnull(val)])
                 chunks.append(row_str)
         elif file_type == "pdf":
             import PyPDF2
-            with open(file_path, "rb") as f:
+            with open(temp_path, "rb") as f:
                 reader = PyPDF2.PdfReader(f)
                 for page_num in range(len(reader.pages)):
                     page_text = reader.pages[page_num].extract_text()
                     if page_text:
                         chunks.append(page_text)
         elif file_type in ("txt", "md"):
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            with open(temp_path, "r", encoding="utf-8", errors="ignore") as f:
                 text = f.read()
             chunk_size = config.get("chunk_size", 512)
             chunk_overlap = config.get("chunk_overlap", 50)
@@ -94,7 +99,7 @@ async def _build_index(index_id: str, config: dict, db):
                 chunks.append(text[i:i+chunk_size])
         elif file_type == "docx":
             import docx
-            doc = docx.Document(file_path)
+            doc = docx.Document(temp_path)
             paragraphs = [p.text for p in doc.paragraphs if p.text]
             text = "\n".join(paragraphs)
             chunk_size = config.get("chunk_size", 512)
@@ -104,7 +109,7 @@ async def _build_index(index_id: str, config: dict, db):
                 chunks.append(text[i:i+chunk_size])
         elif file_type == "json":
             import json
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            with open(temp_path, "r", encoding="utf-8", errors="ignore") as f:
                 data = json.load(f)
             if isinstance(data, list):
                 for item in data:
@@ -149,6 +154,14 @@ async def _build_index(index_id: str, config: dict, db):
             {"_id": index_id},
             {"$set": {"status": "error", "error": str(e)}}
         )
+    finally:
+        if temp_path and os.path.exists(temp_path) and dataset:
+            try:
+                if dataset.get("gridfs_id") and str(dataset.get("gridfs_id")) in temp_path:
+                    os.remove(temp_path)
+                    logger.info(f"Cleaned up temp file used for indexing: {temp_path}")
+            except Exception as clean_err:
+                logger.error(f"Failed to delete temp file {temp_path}: {clean_err}")
 
 
 async def query_vector_store(index_id: str, query: str, top_k: int, db) -> list:

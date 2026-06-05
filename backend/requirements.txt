@@ -18,7 +18,7 @@ langchain-community==0.0.17
 langchain-core==0.1.18
 llama-index==0.10.5
 llama-index-embeddings-huggingface==0.1.4
-# chromadb==0.4.22 # Optional: requires MSVC C++ Build Tools on Windows (falls back to mock if not installed)
+chromadb>=0.4.22
 sentence-transformers==2.3.1
 transformers==4.37.2
 torch>=2.1.2

@@ -10,12 +10,7 @@ import { useChatStore } from '../store'
 import { chatAPI, ragAPI, datasetAPI } from '../services/api'
 import toast from 'react-hot-toast'
 
-const MODELS = [
-  { id: 'llama3', label: 'Llama 3 8B' },
-  { id: 'llama3:70b', label: 'Llama 3 70B' },
-  { id: 'mistral', label: 'Mistral 7B' },
-  { id: 'deepseek', label: 'DeepSeek' },
-]
+
 
 export default function ChatPage() {
   const { id: urlId } = useParams()
@@ -27,7 +22,7 @@ export default function ChatPage() {
   } = useChatStore()
 
   const [input, setInput] = useState('')
-  const [modelMenuOpen, setModelMenuOpen] = useState(false)
+
   const [contextMenuOpen, setContextMenuOpen] = useState(false)
   const [indexes, setIndexes] = useState([])
   const [datasets, setDatasets] = useState([])
@@ -234,7 +229,6 @@ export default function ChatPage() {
               <button
                 onClick={() => {
                   setContextMenuOpen(!contextMenuOpen)
-                  setModelMenuOpen(false)
                 }}
                 className="btn-ghost py-1.5 px-2.5 text-xs flex items-center gap-1.5"
                 style={{

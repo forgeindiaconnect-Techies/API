@@ -26,17 +26,13 @@ class VectorStore:
             self._init_faiss()
 
     def _init_chroma(self):
-        try:
-            import chromadb
-            self._client = chromadb.PersistentClient(path=settings.CHROMA_PERSIST_DIR)
-            self._collection = self._client.get_or_create_collection(
-                name=self.collection_name,
-                metadata={"hnsw:space": "cosine"},
-            )
-            logger.info(f"ChromaDB collection '{self.collection_name}' ready")
-        except ImportError:
-            logger.warning("ChromaDB not installed; using in-memory mock")
-            self._collection = MockVectorCollection(self.collection_name)
+        import chromadb
+        self._client = chromadb.PersistentClient(path=settings.CHROMA_PERSIST_DIR)
+        self._collection = self._client.get_or_create_collection(
+            name=self.collection_name,
+            metadata={"hnsw:space": "cosine"},
+        )
+        logger.info(f"ChromaDB collection '{self.collection_name}' ready")
 
     def _init_faiss(self):
         try:
@@ -163,12 +159,8 @@ class MockVectorCollection:
 
 def get_embedding_model(model_name: str = "all-MiniLM-L6-v2"):
     """Load sentence-transformers embedding model"""
-    try:
-        from sentence_transformers import SentenceTransformer
-        return SentenceTransformer(model_name)
-    except ImportError:
-        logger.warning("sentence-transformers not installed; returning mock embedder")
-        return MockEmbedder()
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer(model_name)
 
 
 class MockEmbedder:
