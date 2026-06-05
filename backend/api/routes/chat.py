@@ -317,28 +317,7 @@ async def stream_message(
     }
     await db.messages.insert_one(user_msg)
 
-    # 2. Build history
-    history = []
-    conv = await db.conversations.find_one({"_id": conversation_id})
-    if conv and conv.get("system_prompt"):
-        history.append({"role": "system", "content": conv["system_prompt"]})
-
-    messages_cursor = db.messages.find({"conversation_id": conversation_id}).sort("created_at", 1)
-    db_messages = []
-    async for m in messages_cursor:
-        db_messages.append(m)
-
-    # Context window sizing
-    context_window_size = data.context_window if data.context_window > 0 else 10
-    recent_messages = db_messages[-context_window_size:] if len(db_messages) > context_window_size else db_messages
-
-    # Add historical messages (excluding the last one which we will modify with context)
-    for m in recent_messages:
-        if m["_id"] == db_messages[-1]["_id"]:
-            continue
-        history.append({"role": m["role"], "content": m["content"]})
-
-    # 3. Fetch context if index_id (RAG) or dataset_id (File) is provided
+    # 2. Check and query selected context (dataset or vector index)
     results = []
     dataset_name = ""
 
@@ -388,202 +367,61 @@ async def stream_message(
         except Exception as e:
             logger.error(f"Error querying vector store: {e}")
 
-    # Helper function to generate direct dataset answer
-    def format_dataset_answer(results, dataset_name):
-        best_match = None
-        if results:
-            # Filter matches with score >= 0.30
-            matches = [r for r in results if r.score >= 0.30]
-            if matches:
-                best_match = matches[0]
-
-        if best_match:
-            answer_content = (
-                f"{best_match.content}\n\n"
-                f"---\n"
-                f"**Source File Name:** {best_match.source}\n"
-                f"**Matching Chunk:** {best_match.content}\n"
-                f"**Similarity Score:** {best_match.score:.4f}"
-            )
+    # Generate answer from context (ChromaDB similarity search matches)
+    async def generate_response():
+        # Check if context was selected at all
+        if not data.dataset_id and not data.index_id:
+            answer_content = "Please select a dataset file from the 'Add Context' dropdown above to begin searching."
         else:
-            filename = dataset_name or "selected file"
-            answer_content = f"No relevant information found in {filename}"
-        return answer_content
+            best_match = None
+            if results:
+                # Filter matches with score >= 0.30
+                matches = [r for r in results if r.score >= 0.30]
+                if matches:
+                    best_match = matches[0]
 
-    # Check if dataset_only mode is selected
-    if data.mode == "dataset_only":
-        async def generate_dataset_only():
-            answer_content = format_dataset_answer(results, dataset_name)
-            
-            # Stream response chunk by chunk for visual streaming effect
-            words = answer_content.split(" ")
-            accumulated = ""
-            for i, word in enumerate(words):
-                token = word + (" " if i < len(words) - 1 else "")
-                accumulated += token
-                yield f"data: {json.dumps({'token': token})}\n\n"
-                await asyncio.sleep(0.01)
-
-            # Save assistant message to DB
-            ai_msg = {
-                "role": "assistant",
-                "content": answer_content,
-                "conversation_id": conversation_id,
-                "user_id": str(current_user["_id"]),
-                "created_at": datetime.utcnow(),
-            }
-            await db.messages.insert_one(ai_msg)
-
-            await db.conversations.update_one(
-                {"_id": conversation_id},
-                {"$set": {"updated_at": datetime.utcnow()}, "$inc": {"message_count": 2}}
-            )
-            yield "data: [DONE]\n\n"
-
-        return StreamingResponse(generate_dataset_only(), media_type="text/event-stream")
-
-    # Otherwise, Standard Dataset + LLM mode (calls Ollama or OpenAI fallback)
-    context_str = ""
-    if results:
-        context_str = "\n\n".join([f"[Source: {r.source} (Similarity Score: {r.score})]\n{r.content}" for r in results])
-
-    latest_content = data.content
-    if context_str:
-        latest_content = f"""Use the following context to answer the question. If the context does not contain the answer, use your general knowledge but prioritize the context.
-
-Context:
-{context_str}
-
-Question: {data.content}
-Answer:"""
-
-    history.append({"role": "user", "content": latest_content})
-
-    async def generate_llm():
-        assistant_content = ""
-        try:
-            client = AsyncClient(host=settings.OLLAMA_BASE_URL, headers={"bypass-tunnel-reminder": "true"})
-            response_stream = await client.chat(
-                model=data.model or "llama3",
-                messages=history,
-                stream=True,
-                options={
-                    "temperature": data.temperature,
-                    "num_predict": data.max_tokens,
-                }
-            )
-
-            async for chunk in response_stream:
-                if "message" in chunk:
-                    token = chunk["message"].get("content", "")
-                    if token:
-                        assistant_content += token
-                        yield f"data: {json.dumps({'token': token})}\n\n"
-
-        except Exception as ollama_err:
-            err_str = str(ollama_err)
-            logger.warning(f"Ollama streaming failed: {err_str}. Checking OpenAI fallback...")
-
-            # Fall back to OpenAI if key is present
-            if settings.OPENAI_API_KEY and not settings.OPENAI_API_KEY.startswith("sk-..."):
-                try:
-                    info_msg = "[System: Local Ollama is offline. Falling back to OpenAI (gpt-4o-mini)...]\n\n"
-                    yield f"data: {json.dumps({'token': info_msg})}\n\n"
-
-                    from openai import AsyncOpenAI
-                    openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-                    
-                    openai_history = [{"role": m["role"], "content": m["content"]} for m in history]
-
-                    stream = await openai_client.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=openai_history,
-                        temperature=data.temperature,
-                        max_tokens=data.max_tokens,
-                        stream=True
-                    )
-
-                    async for chunk in stream:
-                        if chunk.choices and chunk.choices[0].delta.content:
-                            token = chunk.choices[0].delta.content
-                            assistant_content += token
-                            yield f"data: {json.dumps({'token': token})}\n\n"
-
-                except Exception as openai_err:
-                    logger.error(f"OpenAI fallback failed: {openai_err}")
-                    if results:
-                        fallback_msg = (
-                            "🤖 **Note: LLM server is currently offline. Direct matching content retrieved from your dataset:**\n\n"
-                        )
-                        fallback_msg += format_dataset_answer(results, dataset_name)
-                        assistant_content = fallback_msg
-                        yield f"data: {json.dumps({'token': fallback_msg})}\n\n"
-                    else:
-                        err_msg = f"Connection Error: LLM server is offline, and no grounding context is available. Details: {str(openai_err)}"
-                        yield f"data: {json.dumps({'token': err_msg})}\n\n"
+            if best_match:
+                # Return the exact information from the uploaded dataset
+                answer_content = (
+                    f"{best_match.content}\n\n"
+                    f"---\n"
+                    f"**Source File Name:** {best_match.source}\n"
+                    f"**Matching Chunk:** {best_match.content}\n"
+                    f"**Similarity Score:** {best_match.score:.4f}"
+                )
             else:
-                # If no OpenAI configured and Ollama fails, use dataset content as direct output
-                if results:
-                    fallback_msg = (
-                        "🤖 **Note: LLM server is currently offline. Direct matching content retrieved from your dataset:**\n\n"
-                    )
-                    fallback_msg += format_dataset_answer(results, dataset_name)
-                    assistant_content = fallback_msg
-                    yield f"data: {json.dumps({'token': fallback_msg})}\n\n"
-                else:
-                    if "ConnectionRefusedError" in err_str or "ConnectError" in err_str or "connect" in err_str.lower() or "attempts failed" in err_str.lower() or "503" in err_str:
-                        err_msg = f"Connection Error: Local Ollama is offline at {settings.OLLAMA_BASE_URL}. Please start Ollama locally, or configure a valid OPENAI_API_KEY for automatic cloud fallback."
-                    elif "not found" in err_str.lower():
-                        err_msg = f"Model Error: Selected model '{data.model or 'llama3'}' was not found. Run 'ollama pull {data.model or 'llama3'}' to download it."
-                    else:
-                        err_msg = f"Ollama Error: {err_str}"
-                    yield f"data: {json.dumps({'token': err_msg})}\n\n"
+                # Return: 'No relevant information found in the uploaded dataset.'
+                answer_content = "No relevant information found in the uploaded dataset."
 
-        # 4. Save AI Response to MongoDB
-        if assistant_content:
-            ai_msg = {
-                "role": "assistant",
-                "content": assistant_content,
-                "conversation_id": conversation_id,
-                "user_id": str(current_user["_id"]),
-                "created_at": datetime.utcnow(),
-            }
-            await db.messages.insert_one(ai_msg)
+        # Stream response chunk by chunk for visual streaming effect
+        words = answer_content.split(" ")
+        accumulated = ""
+        for i, word in enumerate(words):
+            token = word + (" " if i < len(words) - 1 else "")
+            accumulated += token
+            yield f"data: {json.dumps({'token': token})}\n\n"
+            await asyncio.sleep(0.01)
 
-            # Update conversation message count and updated_at
-            await db.conversations.update_one(
-                {"_id": conversation_id},
-                {"$set": {"updated_at": datetime.utcnow()}, "$inc": {"message_count": 2}}
-            )
+        # Save assistant message to DB
+        ai_msg = {
+            "role": "assistant",
+            "content": answer_content,
+            "conversation_id": conversation_id,
+            "user_id": str(current_user["_id"]),
+            "created_at": datetime.utcnow(),
+        }
+        await db.messages.insert_one(ai_msg)
+
+        # Update conversation message count and updated_at
+        await db.conversations.update_one(
+            {"_id": conversation_id},
+            {"$set": {"updated_at": datetime.utcnow()}, "$inc": {"message_count": 2}}
+        )
         yield "data: [DONE]\n\n"
 
-    return StreamingResponse(generate_llm(), media_type="text/event-stream")
-
+    return StreamingResponse(generate_response(), media_type="text/event-stream")
 
 
 async def get_ollama_response(prompt: str, conv_id: str, db) -> str:
-    """Non-streaming Ollama response using AsyncClient with OpenAI fallback"""
-    try:
-        client = AsyncClient(host=settings.OLLAMA_BASE_URL, headers={"bypass-tunnel-reminder": "true"})
-        response = await client.chat(
-            model="llama3",
-            messages=[{"role": "user", "content": prompt}],
-            stream=False
-        )
-        return response.get("message", {}).get("content", "")
-    except Exception as e:
-        logger.warning(f"Ollama non-streaming failed: {e}. Trying OpenAI fallback...")
-        if settings.OPENAI_API_KEY and not settings.OPENAI_API_KEY.startswith("sk-..."):
-            try:
-                from openai import AsyncOpenAI
-                openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-                res = await openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": prompt}],
-                    stream=False
-                )
-                return res.choices[0].message.content or ""
-            except Exception as openai_err:
-                logger.error(f"OpenAI fallback failed: {openai_err}")
-
-        return f"Error: Local Ollama is offline or model is not loaded. Details: {str(e)}"
+    """Non-streaming fallback message removing Ollama dependency"""
+    return "Dataset-Only RAG is active. Please use the streaming endpoint with a dataset selected."

@@ -92,6 +92,28 @@ async def _build_index(index_id: str, config: dict, db):
             step = chunk_size - chunk_overlap
             for i in range(0, len(text), step):
                 chunks.append(text[i:i+chunk_size])
+        elif file_type == "docx":
+            import docx
+            doc = docx.Document(file_path)
+            paragraphs = [p.text for p in doc.paragraphs if p.text]
+            text = "\n".join(paragraphs)
+            chunk_size = config.get("chunk_size", 512)
+            chunk_overlap = config.get("chunk_overlap", 50)
+            step = chunk_size - chunk_overlap
+            for i in range(0, len(text), step):
+                chunks.append(text[i:i+chunk_size])
+        elif file_type == "json":
+            import json
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                for item in data:
+                    chunks.append(json.dumps(item, ensure_ascii=False))
+            elif isinstance(data, dict):
+                for k, v in data.items():
+                    chunks.append(f"{k}: {json.dumps(v, ensure_ascii=False)}")
+            else:
+                chunks.append(str(data))
         else:
             raise Exception(f"File type {file_type} not indexable for RAG")
 

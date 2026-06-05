@@ -123,7 +123,7 @@ export default function ChatPage() {
           max_tokens: 2048,
           index_id: selectedIndexId || undefined,
           dataset_id: selectedDatasetId || undefined,
-          mode: (selectedIndexId || selectedDatasetId) ? datasetMode : 'dataset_llm'
+          mode: 'dataset_only'
         },
         (chunk) => {
           if (chunk.token) {
@@ -349,69 +349,11 @@ export default function ChatPage() {
               </AnimatePresence>
             </div>
 
-            {/* Dataset/RAG Mode Toggle */}
-            {(selectedDatasetId || selectedIndexId) && (
-              <div className="flex items-center rounded-lg p-0.5" style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)' }}>
-                <button
-                  onClick={() => setDatasetMode('dataset_only')}
-                  className={`px-2.5 py-1 rounded-md text-[10px] font-semibold transition-all ${datasetMode === 'dataset_only' ? 'text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
-                  style={{
-                    background: datasetMode === 'dataset_only' ? 'var(--accent-primary)' : 'transparent',
-                  }}
-                >
-                  Dataset Only
-                </button>
-                <button
-                  onClick={() => setDatasetMode('dataset_llm')}
-                  className={`px-2.5 py-1 rounded-md text-[10px] font-semibold transition-all ${datasetMode === 'dataset_llm' ? 'text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
-                  style={{
-                    background: datasetMode === 'dataset_llm' ? 'var(--accent-primary)' : 'transparent',
-                  }}
-                >
-                  Dataset + LLM
-                </button>
-              </div>
-            )}
-
-            {/* Model selector */}
-            <div className="relative">
-              <button
-                onClick={() => {
-                  setModelMenuOpen(!modelMenuOpen)
-                  setContextMenuOpen(false)
-                }}
-                className="btn-ghost py-1.5 text-xs"
-              >
-                {MODELS.find(m => m.id === selectedModel)?.label || 'Llama 3'}
-                <ChevronDown size={12} />
-              </button>
-              <AnimatePresence>
-                {modelMenuOpen && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 4 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: 4 }}
-                    className="absolute right-0 top-full mt-1 w-40 rounded-lg overflow-hidden z-50"
-                    style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}
-                  >
-                    {MODELS.map((m) => (
-                      <button
-                        key={m.id}
-                        onClick={() => { setModel(m.id); setModelMenuOpen(false) }}
-                        className="w-full text-left px-3 py-2 text-xs transition-colors"
-                        style={{
-                          color: selectedModel === m.id ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                          background: selectedModel === m.id ? 'var(--accent-muted)' : 'transparent'
-                        }}
-                        onMouseEnter={(e) => { if (selectedModel !== m.id) e.currentTarget.style.background = 'var(--bg-tertiary)' }}
-                        onMouseLeave={(e) => { if (selectedModel !== m.id) e.currentTarget.style.background = 'transparent' }}
-                      >
-                        {m.label}
-                      </button>
-                    ))}
-                  </motion.div>
-                )}
-              </AnimatePresence>
+            {/* Dataset-Only RAG Mode Badge */}
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider shadow-sm"
+              style={{ background: 'var(--accent-muted)', border: '1px solid var(--accent-primary)', color: 'var(--accent-primary)' }}>
+              <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: 'var(--accent-primary)' }} />
+              Dataset-Only RAG
             </div>
           </div>
         </div>
@@ -424,9 +366,9 @@ export default function ChatPage() {
                 style={{ background: 'var(--accent-muted)' }}>
                 <Bot size={22} style={{ color: 'var(--accent-primary)' }} />
               </div>
-              <p className="font-semibold" style={{ color: 'var(--text-primary)' }}>Start a conversation</p>
+              <p className="font-semibold" style={{ color: 'var(--text-primary)' }}>Dataset-Only RAG Search</p>
               <p className="text-sm max-w-xs" style={{ color: 'var(--text-muted)' }}>
-                Ask anything — I can help with data analysis, code, questions, and more.
+                Please select a dataset file from the <strong>Add Context</strong> dropdown above to begin searching and chatting.
               </p>
             </div>
           ) : (
