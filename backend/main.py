@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
@@ -58,10 +58,21 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
+    # Suppress logging for HEAD health checks to keep production logs clean
+    if request.method == "HEAD" and request.url.path in ("/", "/api/health"):
+        return await call_next(request)
+
     start = time.time()
     response = await call_next(request)
     duration = round((time.time() - start) * 1000, 2)
-    logger.info(f"{request.method} {request.url.path} → {response.status_code} ({duration}ms)")
+
+    # Filter out 404 noise from crawlers/bots
+    if response.status_code == 404:
+        if request.url.path.startswith(PREFIX) or request.url.path == "/":
+            logger.warning(f"404 Not Found: {request.method} {request.url.path}")
+    else:
+        logger.info(f"{request.method} {request.url.path} → {response.status_code} ({duration}ms)")
+
     response.headers["X-Process-Time"] = str(duration)
     return response
 
@@ -95,8 +106,10 @@ app.include_router(ai_router, prefix=PREFIX)
 
 # ─── Health & Info ────────────────────────────────────────────────────────────
 
-@app.get("/")
-async def root():
+@app.api_route("/", methods=["GET", "HEAD"])
+async def root(request: Request):
+    if request.method == "HEAD":
+        return Response(status_code=200)
     return {
         "status": "healthy",
         "message": "Personal AI Studio API is running",
@@ -104,13 +117,25 @@ async def root():
     }
 
 
-@app.get("/api/health")
-async def health():
+@app.api_route("/api/health", methods=["GET", "HEAD"])
+async def health(request: Request):
+    if request.method == "HEAD":
+        return Response(status_code=200)
     return {
         "status": "healthy",
         "version": settings.APP_VERSION,
         "environment": settings.ENVIRONMENT,
     }
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return Response(content=b"", media_type="image/x-icon", status_code=200)
+
+
+@app.get("/robots.txt", include_in_schema=False)
+async def robots():
+    return Response(content="User-agent: *\nDisallow: /", media_type="text/plain", status_code=200)
 
 
 @app.get("/api/v1/info")
