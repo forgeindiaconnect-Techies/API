@@ -19,7 +19,14 @@ class Settings(BaseSettings):
     DEBUG: bool = True
 
     # Security
-    SECRET_KEY: str = "dev-secret-key-change-in-production"
+    SECRET_KEY: str = Field(
+        default="dev-secret-key-change-in-production",
+        validation_alias=AliasChoices("JWT_SECRET", "SECRET_KEY", "JWT_SECRET_KEY")
+    )
+    JWT_REFRESH_SECRET: str = Field(
+        default="dev-refresh-secret-key-change-in-production",
+        validation_alias=AliasChoices("JWT_REFRESH_SECRET", "REFRESH_SECRET_KEY")
+    )
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30

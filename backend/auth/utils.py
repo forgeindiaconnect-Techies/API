@@ -42,19 +42,26 @@ def create_refresh_token(data: Dict[str, Any]) -> str:
     expire = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     to_encode["exp"] = expire
     to_encode["type"] = "refresh"
-    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    secret = settings.JWT_REFRESH_SECRET or settings.SECRET_KEY
+    return jwt.encode(to_encode, secret, algorithm=settings.ALGORITHM)
 
 
 def decode_token(token: str) -> Dict[str, Any]:
     try:
+        # Try primary secret key first (access tokens)
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         return payload
-    except JWTError as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    except JWTError:
+        try:
+            # Fallback to refresh token secret key (refresh tokens)
+            payload = jwt.decode(token, settings.JWT_REFRESH_SECRET, algorithms=[settings.ALGORITHM])
+            return payload
+        except JWTError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
 
 async def get_current_user(

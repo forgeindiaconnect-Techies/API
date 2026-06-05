@@ -1,0 +1,83 @@
+services:
+  # ─── FastAPI Backend Web Service ─────────────────────────────────────────────
+  - type: web
+    name: personal-ai-studio-backend
+    env: docker
+    dockerfilePath: backend/Dockerfile
+    dockerContext: backend
+    plan: starter # Starter or higher recommended for memory overhead
+    region: oregon # Render region
+    numInstances: 1
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: MONGODB_URL
+        sync: false # Connect your MongoDB Atlas cluster URI here
+      - key: MONGODB_DB_NAME
+        value: personal_ai_studio
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: redis-cache
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: redis
+          name: redis-cache
+          property: connectionString
+      - key: OLLAMA_BASE_URL
+        sync: false # Set to your external RunPod/Vast.ai GPU server URL
+      - key: DEFAULT_MODEL
+        value: llama3
+      - key: OPENAI_API_KEY
+        sync: false # OpenAI fallback token (highly recommended for production fallback)
+      - key: SECRET_KEY
+        generateValue: true # Generates a secure secret key automatically
+
+  # ─── Celery Background Worker Service ────────────────────────────────────────
+  - type: worker
+    name: personal-ai-studio-worker
+    env: docker
+    dockerfilePath: backend/Dockerfile
+    dockerContext: backend
+    plan: starter
+    region: oregon
+    numInstances: 1
+    dockerCommand: celery -A workers.celery_app worker --loglevel=info -Q datasets,training,rag
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: MONGODB_URL
+        sync: false
+      - key: MONGODB_DB_NAME
+        value: personal_ai_studio
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: redis-cache
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: redis
+          name: redis-cache
+          property: connectionString
+      - key: OLLAMA_BASE_URL
+        sync: false
+      - key: DEFAULT_MODEL
+        value: llama3
+      - key: OPENAI_API_KEY
+        sync: false
+
+# ─── Redis Managed Cache & Broker Service ──────────────────────────────────────
+  - type: redis
+    name: redis-cache
+    region: oregon
+    plan: free # Free tier is suitable for initial usage
+    ipAllowList: [] # Access restricted internally for security

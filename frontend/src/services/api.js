@@ -12,8 +12,11 @@ const api = axios.create({
 api.interceptors.request.use((config) => {
   const { token } = useAuthStore.getState()
   if (token) {
-    config.headers = config.headers || {}
-    config.headers.Authorization = `Bearer ${token}`
+    if (config.headers.set) {
+      config.headers.set('Authorization', `Bearer ${token}`)
+    } else {
+      config.headers['Authorization'] = `Bearer ${token}`
+    }
   }
   return config
 })
@@ -32,13 +35,20 @@ api.interceptors.response.use(
             refresh_token: refreshToken,
           })
           setAuth(data.user, data.access_token, data.refresh_token)
-          original.headers.Authorization = `Bearer ${data.access_token}`
+          
+          if (original.headers.set) {
+            original.headers.set('Authorization', `Bearer ${data.access_token}`)
+          } else {
+            original.headers['Authorization'] = `Bearer ${data.access_token}`
+          }
           return api(original)
-        } catch {
+        } catch (refreshErr) {
           logout()
+          window.location.href = '/login'
         }
       } else {
         logout()
+        window.location.href = '/login'
       }
     }
     return Promise.reject(err)
