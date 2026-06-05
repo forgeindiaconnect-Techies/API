@@ -36,7 +36,7 @@ class VectorStore:
             logger.info(f"ChromaDB collection '{self.collection_name}' ready")
         except ImportError:
             logger.warning("ChromaDB not installed; using in-memory mock")
-            self._collection = MockVectorCollection()
+            self._collection = MockVectorCollection(self.collection_name)
 
     def _init_faiss(self):
         try:
@@ -126,9 +126,13 @@ class VectorStore:
 
 class MockVectorCollection:
     """In-memory mock for testing without ChromaDB"""
+    _shared_collections = {}
 
-    def __init__(self):
-        self._data: List[Dict] = []
+    def __init__(self, collection_name: str = "default"):
+        self.collection_name = collection_name
+        if collection_name not in MockVectorCollection._shared_collections:
+            MockVectorCollection._shared_collections[collection_name] = []
+        self._data = MockVectorCollection._shared_collections[collection_name]
 
     def add(self, documents, embeddings, metadatas, ids):
         for i in range(len(ids)):

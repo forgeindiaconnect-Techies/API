@@ -133,11 +133,48 @@ async def send_message(
     return {"user": fmt_msg(user_msg), "assistant": fmt_msg(ai_msg)}
 
 
+def ensure_file_locally_present(dataset: dict) -> bool:
+    """Helper to verify if a dataset file exists locally, and copy it from fallback directories if needed."""
+    import shutil
+    file_path = dataset.get("file_path")
+    if not file_path:
+        return False
+        
+    if os.path.exists(file_path):
+        return True
+        
+    filename = dataset.get("name")
+    if not filename:
+        return False
+        
+    fallbacks = [
+        os.path.join("C:\\Users\\Thiru T\\Desktop", filename),
+        os.path.join("C:\\Users\\Thiru T\\Downloads", filename),
+        os.path.join("c:\\Users\\Thiru T\\Desktop\\personal-ai-studio", filename),
+        os.path.join("c:\\Users\\Thiru T\\Desktop\\personal-ai-studio\\backend", filename),
+    ]
+    
+    for fb in fallbacks:
+        if os.path.exists(fb):
+            try:
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                shutil.copy2(fb, file_path)
+                logger.info(f"Copied fallback dataset file from {fb} to {file_path}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to copy fallback file from {fb} to {file_path}: {e}")
+                
+    return False
+
+
 async def read_dataset_context(dataset_id: str, db) -> str:
     """Reads dataset text/metadata to feed directly as immediate context"""
     dataset = await db.datasets.find_one({"_id": dataset_id})
     if not dataset:
         return ""
+    
+    # Ensure file is locally present
+    ensure_file_locally_present(dataset)
     
     file_path = dataset.get("file_path")
     file_type = dataset.get("file_type")
@@ -203,6 +240,65 @@ async def check_ollama_health(current_user=Depends(get_current_user)):
         }
 
 
+async def ensure_dataset_indexed(dataset_id: str, db) -> str:
+    """Check if the dataset has a ready vector index; if not, build it synchronously."""
+    index = await db.rag_indexes.find_one({"dataset_id": dataset_id, "status": "ready"})
+    if index:
+        try:
+            from vector_db.store import VectorStore
+            store = VectorStore(backend=index.get("index_type", "chroma"), collection_name=str(index["_id"]))
+            if store.count() > 0:
+                return str(index["_id"])
+            logger.info(f"Index {index['_id']} is ready in DB but empty in vector store (possibly process restart with mock). Rebuilding...")
+        except Exception as e:
+            logger.error(f"Error checking vector store count: {e}")
+
+    # Find the dataset
+    dataset = await db.datasets.find_one({"_id": dataset_id})
+    if not dataset:
+        raise HTTPException(status_code=404, detail=f"Dataset {dataset_id} not found")
+
+    # Ensure file is locally present before building index
+    ensure_file_locally_present(dataset)
+
+    # Check if there is an index doc already
+    index_doc = await db.rag_indexes.find_one({"dataset_id": dataset_id})
+    if index_doc:
+        index_id = str(index_doc["_id"])
+        await db.rag_indexes.update_one({"_id": index_id}, {"$set": {"status": "building", "error": None}})
+    else:
+        doc = {
+            "name": f"Dynamic Index - {dataset['name']}",
+            "dataset_id": dataset_id,
+            "embedding_model": "all-MiniLM-L6-v2",
+            "chunk_size": 512,
+            "chunk_overlap": 50,
+            "index_type": "chroma",
+            "chunk_count": 0,
+            "status": "building",
+            "user_id": dataset["user_id"],
+            "created_at": datetime.utcnow(),
+        }
+        result = await db.rag_indexes.insert_one(doc)
+        index_id = str(result.inserted_id)
+
+    # Build index synchronously to guarantee it is indexed when queried
+    from api.routes.rag import _build_index
+    try:
+        await _build_index(index_id, {
+            "chunk_size": 512,
+            "chunk_overlap": 50,
+            "index_type": "chroma",
+            "embedding_model": "all-MiniLM-L6-v2",
+        }, db)
+    except Exception as e:
+        logger.error(f"Failed to auto-index dataset {dataset_id}: {e}")
+        await db.rag_indexes.update_one({"_id": index_id}, {"$set": {"status": "error", "error": str(e)}})
+        raise HTTPException(status_code=500, detail=f"Failed to index dataset: {str(e)}")
+
+    return index_id
+
+
 @router.post("/conversations/{conversation_id}/stream")
 async def stream_message(
     conversation_id: str,
@@ -243,31 +339,26 @@ async def stream_message(
         history.append({"role": m["role"], "content": m["content"]})
 
     # 3. Fetch context if index_id (RAG) or dataset_id (File) is provided
-    latest_content = data.content
-    context_str = ""
     results = []
+    dataset_name = ""
 
-    if data.index_id:
+    if data.dataset_id:
         try:
+            dataset = await db.datasets.find_one({"_id": data.dataset_id})
+            if dataset:
+                dataset_name = dataset.get("name", "selected file")
+            
+            # Ensure dataset is indexed synchronously
+            index_id = await ensure_dataset_indexed(data.dataset_id, db)
+            
             from api.routes.rag import query_vector_store
-            results = await query_vector_store(data.index_id, data.content, top_k=3, db=db)
+            results = await query_vector_store(index_id, data.content, top_k=3, db=db)
         except Exception as e:
-            logger.error(f"Error querying vector store: {e}")
-    elif data.dataset_id:
-        try:
-            from api.routes.rag import query_vector_store
-            # Check if there is an index ready for this dataset
-            index = await db.rag_indexes.find_one({"dataset_id": data.dataset_id, "status": "ready"})
-            if index:
-                results = await query_vector_store(str(index["_id"]), data.content, top_k=3, db=db)
-            else:
-                # Local dynamic text search fallback if no index is ready
-                dataset = await db.datasets.find_one({"_id": data.dataset_id})
-                dataset_name = dataset.get("name", "grounding_doc") if dataset else "grounding_doc"
-                
+            logger.error(f"Error ensuring dataset is indexed or querying vector store: {e}")
+            # Local dynamic text search fallback as backup
+            try:
                 text_content = await read_dataset_context(data.dataset_id, db)
                 if text_content:
-                    # Segment file into overlapping chunks
                     chunks = [text_content[i:i+500] for i in range(0, len(text_content), 400)]
                     query_words = [w.lower() for w in data.content.split() if len(w) > 3]
                     matches = []
@@ -283,18 +374,80 @@ async def stream_message(
                         SearchResult(
                             content=m[0].strip(),
                             score=round(float(m[1] / max(1, len(query_words))), 2),
-                            source=dataset_name,
-                            metadata={"source": dataset_name}
+                            source=dataset_name or "selected file",
+                            metadata={"source": dataset_name or "selected file"}
                         )
                         for m in matches[:3]
                     ]
+            except Exception as fallback_err:
+                logger.error(f"Fallback text search also failed: {fallback_err}")
+    elif data.index_id:
+        try:
+            from api.routes.rag import query_vector_store
+            results = await query_vector_store(data.index_id, data.content, top_k=3, db=db)
         except Exception as e:
-            logger.error(f"Error running dataset dynamic RAG search: {e}")
+            logger.error(f"Error querying vector store: {e}")
 
-    # Build grounding context with matched scores and file name citations
+    # Helper function to generate direct dataset answer
+    def format_dataset_answer(results, dataset_name):
+        best_match = None
+        if results:
+            # Filter matches with score >= 0.30
+            matches = [r for r in results if r.score >= 0.30]
+            if matches:
+                best_match = matches[0]
+
+        if best_match:
+            answer_content = (
+                f"{best_match.content}\n\n"
+                f"---\n"
+                f"**Source File Name:** {best_match.source}\n"
+                f"**Matching Chunk:** {best_match.content}\n"
+                f"**Similarity Score:** {best_match.score:.4f}"
+            )
+        else:
+            filename = dataset_name or "selected file"
+            answer_content = f"No relevant information found in {filename}"
+        return answer_content
+
+    # Check if dataset_only mode is selected
+    if data.mode == "dataset_only":
+        async def generate_dataset_only():
+            answer_content = format_dataset_answer(results, dataset_name)
+            
+            # Stream response chunk by chunk for visual streaming effect
+            words = answer_content.split(" ")
+            accumulated = ""
+            for i, word in enumerate(words):
+                token = word + (" " if i < len(words) - 1 else "")
+                accumulated += token
+                yield f"data: {json.dumps({'token': token})}\n\n"
+                await asyncio.sleep(0.01)
+
+            # Save assistant message to DB
+            ai_msg = {
+                "role": "assistant",
+                "content": answer_content,
+                "conversation_id": conversation_id,
+                "user_id": str(current_user["_id"]),
+                "created_at": datetime.utcnow(),
+            }
+            await db.messages.insert_one(ai_msg)
+
+            await db.conversations.update_one(
+                {"_id": conversation_id},
+                {"$set": {"updated_at": datetime.utcnow()}, "$inc": {"message_count": 2}}
+            )
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(generate_dataset_only(), media_type="text/event-stream")
+
+    # Otherwise, Standard Dataset + LLM mode (calls Ollama or OpenAI fallback)
+    context_str = ""
     if results:
         context_str = "\n\n".join([f"[Source: {r.source} (Similarity Score: {r.score})]\n{r.content}" for r in results])
 
+    latest_content = data.content
     if context_str:
         latest_content = f"""Use the following context to answer the question. If the context does not contain the answer, use your general knowledge but prioritize the context.
 
@@ -306,7 +459,7 @@ Answer:"""
 
     history.append({"role": "user", "content": latest_content})
 
-    async def generate():
+    async def generate_llm():
         assistant_content = ""
         try:
             client = AsyncClient(host=settings.OLLAMA_BASE_URL, headers={"bypass-tunnel-reminder": "true"})
@@ -360,10 +513,9 @@ Answer:"""
                     logger.error(f"OpenAI fallback failed: {openai_err}")
                     if results:
                         fallback_msg = (
-                            "🤖 **Note: LLM server is currently offline. Here is the direct matching content retrieved from your dataset:**\n\n"
+                            "🤖 **Note: LLM server is currently offline. Direct matching content retrieved from your dataset:**\n\n"
                         )
-                        for idx, r in enumerate(results):
-                            fallback_msg += f"**Chunk {idx+1} (Source: `{r.source}`, Similarity Score: `{r.score}`)**:\n> {r.content}\n\n"
+                        fallback_msg += format_dataset_answer(results, dataset_name)
                         assistant_content = fallback_msg
                         yield f"data: {json.dumps({'token': fallback_msg})}\n\n"
                     else:
@@ -373,10 +525,9 @@ Answer:"""
                 # If no OpenAI configured and Ollama fails, use dataset content as direct output
                 if results:
                     fallback_msg = (
-                        "🤖 **Note: LLM server is currently offline. Here is the direct matching content retrieved from your dataset:**\n\n"
+                        "🤖 **Note: LLM server is currently offline. Direct matching content retrieved from your dataset:**\n\n"
                     )
-                    for idx, r in enumerate(results):
-                        fallback_msg += f"**Chunk {idx+1} (Source: `{r.source}`, Similarity Score: `{r.score}`)**:\n> {r.content}\n\n"
+                    fallback_msg += format_dataset_answer(results, dataset_name)
                     assistant_content = fallback_msg
                     yield f"data: {json.dumps({'token': fallback_msg})}\n\n"
                 else:
@@ -406,7 +557,8 @@ Answer:"""
             )
         yield "data: [DONE]\n\n"
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return StreamingResponse(generate_llm(), media_type="text/event-stream")
+
 
 
 async def get_ollama_response(prompt: str, conv_id: str, db) -> str:

@@ -33,6 +33,7 @@ export default function ChatPage() {
   const [datasets, setDatasets] = useState([])
   const [selectedIndexId, setSelectedIndexId] = useState(null)
   const [selectedDatasetId, setSelectedDatasetId] = useState(null)
+  const [datasetMode, setDatasetMode] = useState('dataset_llm')
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
 
@@ -121,7 +122,8 @@ export default function ChatPage() {
           temperature: 0.7,
           max_tokens: 2048,
           index_id: selectedIndexId || undefined,
-          dataset_id: selectedDatasetId || undefined
+          dataset_id: selectedDatasetId || undefined,
+          mode: (selectedIndexId || selectedDatasetId) ? datasetMode : 'dataset_llm'
         },
         (chunk) => {
           if (chunk.token) {
@@ -267,6 +269,7 @@ export default function ChatPage() {
                       onClick={() => {
                         setSelectedIndexId(null)
                         setSelectedDatasetId(null)
+                        setDatasetMode('dataset_llm')
                         setContextMenuOpen(false)
                       }}
                       className="w-full text-left px-3.5 py-1.5 text-xs rounded transition-colors flex items-center justify-between"
@@ -345,6 +348,30 @@ export default function ChatPage() {
                 )}
               </AnimatePresence>
             </div>
+
+            {/* Dataset/RAG Mode Toggle */}
+            {(selectedDatasetId || selectedIndexId) && (
+              <div className="flex items-center rounded-lg p-0.5" style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)' }}>
+                <button
+                  onClick={() => setDatasetMode('dataset_only')}
+                  className={`px-2.5 py-1 rounded-md text-[10px] font-semibold transition-all ${datasetMode === 'dataset_only' ? 'text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
+                  style={{
+                    background: datasetMode === 'dataset_only' ? 'var(--accent-primary)' : 'transparent',
+                  }}
+                >
+                  Dataset Only
+                </button>
+                <button
+                  onClick={() => setDatasetMode('dataset_llm')}
+                  className={`px-2.5 py-1 rounded-md text-[10px] font-semibold transition-all ${datasetMode === 'dataset_llm' ? 'text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
+                  style={{
+                    background: datasetMode === 'dataset_llm' ? 'var(--accent-primary)' : 'transparent',
+                  }}
+                >
+                  Dataset + LLM
+                </button>
+              </div>
+            )}
 
             {/* Model selector */}
             <div className="relative">
@@ -471,6 +498,7 @@ export default function ChatPage() {
               onClick={() => {
                 setSelectedIndexId(null)
                 setSelectedDatasetId(null)
+                setDatasetMode('dataset_llm')
               }}
               className="text-slate-500 hover:text-slate-300 p-0.5 rounded-full hover:bg-slate-700/30 transition-colors"
             >

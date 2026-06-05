@@ -118,6 +118,8 @@ class StreamRequest(BaseModel):
     context_window: int = 10
     index_id: Optional[str] = None
     dataset_id: Optional[str] = None
+    mode: Optional[str] = "dataset_llm"
+
 
 
 
