@@ -118,7 +118,7 @@ export default function ChatPage() {
           max_tokens: 2048,
           index_id: selectedIndexId || undefined,
           dataset_id: selectedDatasetId || undefined,
-          mode: 'dataset_only'
+          mode: datasetMode
         },
         (chunk) => {
           if (chunk.token) {
@@ -347,7 +347,7 @@ export default function ChatPage() {
             <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider shadow-sm"
               style={{ background: 'var(--accent-muted)', border: '1px solid var(--accent-primary)', color: 'var(--accent-primary)' }}>
               <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: 'var(--accent-primary)' }} />
-              Dataset-Only RAG
+              RAG Search Active
             </div>
           </div>
         </div>

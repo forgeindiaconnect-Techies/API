@@ -69,6 +69,23 @@ async def log_requests(request: Request, call_next):
         response = await call_next(request)
         duration = round((time.time() - start) * 1000, 2)
 
+        # Set manual CORS headers on all responses so it's always set (even on errors, preflights, and streaming)
+        allowed_origins = [
+            "https://d-ai-nu.vercel.app",
+            "http://localhost:3000",
+            "http://localhost:5173"
+        ]
+        if origin:
+            if origin in allowed_origins or (origin.startswith("https://") and origin.endswith(".vercel.app")):
+                response.headers["Access-Control-Allow-Origin"] = origin
+            else:
+                response.headers["Access-Control-Allow-Origin"] = "https://d-ai-nu.vercel.app"
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, HEAD"
+            response.headers["Access-Control-Allow-Headers"] = "*"
+        elif not response.headers.get("access-control-allow-origin"):
+            response.headers["Access-Control-Allow-Origin"] = "https://d-ai-nu.vercel.app"
+
         # Filter out 404 noise from crawlers/bots
         if response.status_code == 404:
             if request.url.path.startswith(PREFIX) or request.url.path == "/":

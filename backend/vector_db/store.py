@@ -79,16 +79,30 @@ class VectorStore:
                     raise
 
     def _init_faiss(self):
+        self._faiss_dir = os.path.join(os.path.dirname(settings.CHROMA_PERSIST_DIR), "faiss_db")
+        os.makedirs(self._faiss_dir, exist_ok=True)
+        self._index_path = os.path.join(self._faiss_dir, f"{self.collection_name}.index")
+        self._docs_path = os.path.join(self._faiss_dir, f"{self.collection_name}.json")
+
         try:
             import faiss
+            import json
             import numpy as np
             self._dimension = 384
-            self._index = faiss.IndexFlatL2(self._dimension)
-            self._docs: List[Dict] = []
-            logger.info("FAISS index ready")
+            
+            if os.path.exists(self._index_path) and os.path.exists(self._docs_path):
+                self._index = faiss.read_index(self._index_path)
+                with open(self._docs_path, "r", encoding="utf-8") as f:
+                    self._docs = json.load(f)
+                logger.info(f"Loaded FAISS index '{self.collection_name}' from disk with {len(self._docs)} documents.")
+            else:
+                self._index = faiss.IndexFlatL2(self._dimension)
+                self._docs = []
+                logger.info(f"Initialized new FAISS index '{self.collection_name}'")
         except ImportError:
             logger.warning("FAISS not installed; using mock")
             self._index = None
+            self._docs = []
 
     async def add_documents(
         self,
@@ -131,8 +145,9 @@ class VectorStore:
             await run_with_retry_async(op)
         elif self.backend == "faiss" and self._index is not None:
             import numpy as np
+            import faiss
+            import json
             if embeddings and len(embeddings[0]) != self._dimension:
-                import faiss
                 self._dimension = len(embeddings[0])
                 self._index = faiss.IndexFlatL2(self._dimension)
                 logger.info(f"Re-initialized FAISS index with dimension {self._dimension}")
@@ -142,6 +157,10 @@ class VectorStore:
                 [{"id": ids[i], "document": documents[i], "metadata": metadatas[i]}
                  for i in range(len(documents))]
             )
+            # Persist FAISS to disk
+            faiss.write_index(self._index, self._index_path)
+            with open(self._docs_path, "w", encoding="utf-8") as f:
+                json.dump(self._docs, f, ensure_ascii=False, indent=2)
         return len(documents)
 
     async def query(
@@ -170,14 +189,13 @@ class VectorStore:
         elif self.backend == "faiss" and self._index is not None:
             import numpy as np
             if len(query_embedding) != self._dimension:
-                # If query dimension mismatch, return empty results
                 logger.warning(f"FAISS dimension mismatch: query={len(query_embedding)} vs index={self._dimension}")
                 return []
             arr = np.array([query_embedding], dtype="float32")
             D, I = self._index.search(arr, top_k)
             out = []
             for idx, dist in zip(I[0], D[0]):
-                if idx < len(self._docs):
+                if idx >= 0 and idx < len(self._docs):
                     doc = self._docs[idx]
                     out.append({**doc, "score": float(1 / (1 + dist))})
             return out
@@ -314,15 +332,6 @@ def get_embedding_model(model_name: str = "all-MiniLM-L6-v2"):
             return OpenAIEmbedder(api_key=settings.OPENAI_API_KEY)
         except Exception as e:
             logger.error(f"Failed to initialize OpenAIEmbedder: {e}. Falling back to SentenceTransformer.")
-
-    # Detect if we are on Render with memory limitations, or if disabled via env var
-    is_render = os.environ.get("RENDER") == "true" or "RENDER_SERVICE_ID" in os.environ
-    disable_local = os.environ.get("DISABLE_LOCAL_EMBEDDINGS", "").lower() in ("true", "1", "yes")
-    
-    if (is_render or disable_local) and (not settings.OPENAI_API_KEY or settings.OPENAI_API_KEY.startswith("sk-...")):
-        logger.warning("Running in a low-memory/Render environment without a valid OpenAI API key. "
-                       "Bypassing SentenceTransformer import to avoid OOM crash; falling back directly to HashingTFIDFEmbedder.")
-        return HashingTFIDFEmbedder(384)
 
     # 2. Try SentenceTransformer
     try:

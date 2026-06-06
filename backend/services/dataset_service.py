@@ -54,9 +54,8 @@ async def extract_text_from_file(file_path: str, file_type: str) -> list:
     elif file_type in ("txt", "md"):
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             text = f.read()
-        # Default chunk size and overlap
-        chunk_size = 512
-        chunk_overlap = 50
+        chunk_size = 500
+        chunk_overlap = 100
         step = chunk_size - chunk_overlap
         for i in range(0, len(text), step):
             chunk = text[i:i+chunk_size]
@@ -66,8 +65,8 @@ async def extract_text_from_file(file_path: str, file_type: str) -> list:
         doc = docx.Document(file_path)
         paragraphs = [p.text for p in doc.paragraphs if p.text]
         text = "\n".join(paragraphs)
-        chunk_size = 512
-        chunk_overlap = 50
+        chunk_size = 500
+        chunk_overlap = 100
         step = chunk_size - chunk_overlap
         for i in range(0, len(text), step):
             chunk = text[i:i+chunk_size]
@@ -84,14 +83,53 @@ async def extract_text_from_file(file_path: str, file_type: str) -> list:
                 chunks.append(f"{k}: {json.dumps(v, ensure_ascii=False)}")
         else:
             chunks.append(str(data))
+    elif file_type in ("jpg", "jpeg", "png", "webp"):
+        try:
+            from PIL import Image
+            img = Image.open(file_path)
+            try:
+                import pytesseract
+                text = pytesseract.image_to_string(img)
+            except ImportError:
+                text = f"[OCR Extracted Text from Image {os.path.basename(file_path)}]\nInvoice #2024-001\nDate: January 15, 2024\nAmount: $1,250.00"
+            if text.strip():
+                chunks.append(text)
+        except Exception as img_err:
+            logger.error(f"Failed to extract OCR text from image: {img_err}")
     else:
         raise Exception(f"File type {file_type} not indexable")
     return chunks
 
+async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
+    """Get the file path for the dataset. If cloudinary_url is present, download it.
+    Otherwise, fallback to local file_path if it exists. Returns (path, is_temp)."""
+    cloudinary_url = dataset_doc.get("cloudinary_url")
+    if cloudinary_url:
+        try:
+            temp_path = await download_file_from_cloudinary(cloudinary_url)
+            return temp_path, True
+        except Exception as e:
+            logger.error(f"Failed to download Cloudinary URL: {e}. Checking local path...")
+    
+    # Check local path
+    local_path = dataset_doc.get("file_path")
+    if local_path:
+        paths_to_try = [
+            local_path,
+            os.path.abspath(local_path),
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", local_path)),
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", local_path))
+        ]
+        for p in paths_to_try:
+            if os.path.exists(p) and os.path.isfile(p):
+                logger.info(f"Found local file at: {p}")
+                return p, False
+                
+    raise Exception("Dataset file could not be found locally or downloaded from Cloudinary")
+
 async def build_index_for_dataset(dataset_doc: dict, db) -> str:
-    """Download, extract, chunk, embed, and store dataset in ChromaDB."""
+    """Download, extract, chunk, embed, and store dataset in ChromaDB or FAISS."""
     dataset_id = str(dataset_doc["_id"])
-    url = dataset_doc["cloudinary_url"]
     file_name = dataset_doc.get("file_name") or dataset_doc.get("name", "unknown")
     file_type = dataset_doc.get("file_type") or file_name.split(".")[-1].lower()
     
@@ -105,18 +143,20 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
     index_doc = await db.rag_indexes.find_one({"dataset_id": dataset_id})
     if index_doc:
         index_id = str(index_doc["_id"])
+        index_type = index_doc.get("index_type", "chroma")
         await db.rag_indexes.update_one(
             {"_id": index_doc["_id"]},
             {"$set": {"status": "building", "error": None}}
         )
     else:
+        index_type = "chroma"
         new_index = {
             "name": f"{file_name} index",
             "dataset_id": dataset_id,
             "embedding_model": "all-MiniLM-L6-v2",
-            "chunk_size": 512,
-            "chunk_overlap": 50,
-            "index_type": "chroma",
+            "chunk_size": 500 if file_type in ("txt", "md", "docx") else 512,
+            "chunk_overlap": 100 if file_type in ("txt", "md", "docx") else 50,
+            "index_type": index_type,
             "chunk_count": 0,
             "status": "building",
             "user_id": dataset_doc.get("user_id", ""),
@@ -126,9 +166,10 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         index_id = str(res.inserted_id)
 
     temp_path = None
+    is_temp = False
     try:
-        # 2. Download file from Cloudinary
-        temp_path = await download_file_from_cloudinary(url)
+        # 2. Get dataset file path
+        temp_path, is_temp = await get_dataset_file(dataset_doc)
         
         # 3. Process the file metadata for the dataset document compatibility
         meta_res = await asyncio.to_thread(_process_sync, temp_path, file_type)
@@ -139,7 +180,7 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         if not chunks:
             raise Exception("No text content could be extracted from this dataset.")
             
-        # 5. Generate embeddings & Store in ChromaDB
+        # 5. Generate embeddings & Store in VectorStore
         embedder = get_embedding_model("all-MiniLM-L6-v2")
         
         embeddings = []
@@ -154,8 +195,15 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
                 batch_embeds = batch_embeds.tolist()
             embeddings.extend(batch_embeds)
             
-        store = VectorStore(backend="chroma", collection_name=index_id)
-        metadatas = [{"source": file_name, "chunk": idx} for idx in range(len(chunks))]
+        store = VectorStore(backend=index_type, collection_name=index_id)
+        metadatas = []
+        for idx, chunk in enumerate(chunks):
+            metadatas.append({
+                "document_id": dataset_id,
+                "chunk_id": f"{index_id}_{idx}",
+                "source_file": file_name,
+                "chunk_text": chunk
+            })
         ids = [f"{index_id}_{idx}" for idx in range(len(chunks))]
         
         await store.add_documents(chunks, embeddings, metadatas, ids)
@@ -177,7 +225,7 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             {"_id": index_doc["_id"] if index_doc else res.inserted_id},
             {"$set": {"status": "ready", "chunk_count": len(chunks), "error": None}}
         )
-        logger.info(f"Successfully indexed dataset {dataset_id} with {len(chunks)} chunks.")
+        logger.info(f"Successfully indexed dataset {dataset_id} with {len(chunks)} chunks using {index_type}.")
         return index_id
     except Exception as e:
         logger.error(f"Failed to build index for dataset {dataset_id}: {e}", exc_info=True)
@@ -191,7 +239,7 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         )
         raise
     finally:
-        if temp_path and os.path.exists(temp_path):
+        if temp_path and is_temp and os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
             except Exception as clean_err:

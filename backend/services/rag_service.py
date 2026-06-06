@@ -44,57 +44,9 @@ async def _build_index(index_id: str, config: dict, db):
         temp_path = await download_file_from_gridfs(dataset)
         file_type = dataset.get("file_type")
 
-        # 1. Extract text / rows
-        chunks = []
-        if file_type in ("csv", "xlsx", "xls"):
-            import pandas as pd
-            if file_type == "csv":
-                df = pd.read_csv(temp_path)
-            else:
-                df = pd.read_excel(temp_path)
-            for i, row in df.iterrows():
-                row_str = ", ".join([f"{col}: {val}" for col, val in row.items() if pd.notnull(val)])
-                chunks.append(row_str)
-        elif file_type == "pdf":
-            import PyPDF2
-            with open(temp_path, "rb") as f:
-                reader = PyPDF2.PdfReader(f)
-                for page_num in range(len(reader.pages)):
-                    page_text = reader.pages[page_num].extract_text()
-                    if page_text:
-                        chunks.append(page_text)
-        elif file_type in ("txt", "md"):
-            with open(temp_path, "r", encoding="utf-8", errors="ignore") as f:
-                text = f.read()
-            chunk_size = config.get("chunk_size", 512)
-            chunk_overlap = config.get("chunk_overlap", 50)
-            step = chunk_size - chunk_overlap
-            for i in range(0, len(text), step):
-                chunks.append(text[i:i+chunk_size])
-        elif file_type == "docx":
-            import docx
-            doc = docx.Document(temp_path)
-            paragraphs = [p.text for p in doc.paragraphs if p.text]
-            text = "\n".join(paragraphs)
-            chunk_size = config.get("chunk_size", 512)
-            chunk_overlap = config.get("chunk_overlap", 50)
-            step = chunk_size - chunk_overlap
-            for i in range(0, len(text), step):
-                chunks.append(text[i:i+chunk_size])
-        elif file_type == "json":
-            import json
-            with open(temp_path, "r", encoding="utf-8", errors="ignore") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                for item in data:
-                    chunks.append(json.dumps(item, ensure_ascii=False))
-            elif isinstance(data, dict):
-                for k, v in data.items():
-                    chunks.append(f"{k}: {json.dumps(v, ensure_ascii=False)}")
-            else:
-                chunks.append(str(data))
-        else:
-            raise Exception(f"File type {file_type} not indexable for RAG")
+        # 1. Extract text / rows using the shared service logic
+        from services.dataset_service import extract_text_from_file
+        chunks = await extract_text_from_file(temp_path, file_type)
 
         # 2. Create embeddings & save to VectorStore
         if chunks:
@@ -113,8 +65,18 @@ async def _build_index(index_id: str, config: dict, db):
                     batch_embeds = batch_embeds.tolist()
                 embeddings.extend(batch_embeds)
 
-            store = VectorStore(backend=config.get("index_type", "chroma"), collection_name=index_id)
-            metadatas = [{"source": dataset["name"], "chunk": idx} for idx in range(len(chunks))]
+            index_type = config.get("index_type", "chroma")
+            store = VectorStore(backend=index_type, collection_name=index_id)
+            
+            # Format proper metadata structure
+            metadatas = []
+            for idx, chunk in enumerate(chunks):
+                metadatas.append({
+                    "document_id": dataset_id,
+                    "chunk_id": f"{index_id}_{idx}",
+                    "source_file": dataset["name"],
+                    "chunk_text": chunk
+                })
             ids = [f"{index_id}_{idx}" for idx in range(len(chunks))]
             await store.add_documents(chunks, embeddings, metadatas, ids)
 

@@ -1,10 +1,12 @@
 import sys
 import os
+import logging
 import asyncio
+logging.basicConfig(level=logging.INFO)
 from datetime import datetime
 
 # Add backend to path so we can import things
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'backend')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'backend')))
 
 from database import connect_db, get_db
 from models import StreamRequest
@@ -61,6 +63,46 @@ async def main():
         # Iterate over the generator
         async for chunk in response.body_iterator:
             print(chunk, end="")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+
+    # Create a second StreamRequest with irrelevant query to test low confidence
+    req2 = StreamRequest(
+        content="what is the speed of light?",
+        model="llama3",
+        dataset_id=str(dataset["_id"]),
+        mode="dataset_only"
+    )
+    
+    print("\n\n--- Testing Stream with Low Confidence query ('what is the speed of light?') ---")
+    
+    try:
+        response = await stream_message(conversation_id, req2, current_user)
+        # Iterate over the generator
+        async for chunk in response.body_iterator:
+            print(chunk, end="")
+        print()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+
+    # Create a third StreamRequest with completely garbage query to test zero match chunks
+    req3 = StreamRequest(
+        content="xyzabc",
+        model="llama3",
+        dataset_id=str(dataset["_id"]),
+        mode="dataset_only"
+    )
+    
+    print("\n\n--- Testing Stream with Zero Match query ('xyzabc') ---")
+    
+    try:
+        response = await stream_message(conversation_id, req3, current_user)
+        # Iterate over the generator
+        async for chunk in response.body_iterator:
+            print(chunk, end="")
+        print()
     except Exception as e:
         import traceback
         traceback.print_exc()

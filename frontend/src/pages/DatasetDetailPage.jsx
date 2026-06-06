@@ -41,17 +41,20 @@ export default function DatasetDetailPage() {
       setDataset(dsRes.data)
 
       if (dsRes.data.status === 'ready') {
-        if (['csv', 'xlsx', 'xls'].includes(dsRes.data.file_type)) {
-          try {
-            const [edaRes, previewRes] = await Promise.all([
-              datasetAPI.getEDA(id),
-              datasetAPI.getPreview(id)
-            ])
-            setEda(edaRes.data)
-            setPreview(previewRes.data)
-          } catch (err) {
-            console.error('Failed to load EDA or Preview data', err)
+        const supportEDA = ['csv', 'xlsx', 'xls', 'txt', 'md', 'pdf', 'docx'].includes(dsRes.data.file_type)
+        const supportPreview = ['csv', 'xlsx', 'xls', 'txt', 'md', 'pdf', 'docx', 'json'].includes(dsRes.data.file_type)
+        
+        try {
+          const promises = []
+          if (supportEDA) {
+            promises.push(datasetAPI.getEDA(id).then(res => setEda(res.data)).catch(err => console.error(err)))
           }
+          if (supportPreview) {
+            promises.push(datasetAPI.getPreview(id).then(res => setPreview(res.data)).catch(err => console.error(err)))
+          }
+          await Promise.all(promises)
+        } catch (err) {
+          console.error('Failed to load EDA or Preview data', err)
         }
       }
     } catch (err) {
@@ -91,7 +94,9 @@ export default function DatasetDetailPage() {
     if (!dataset) return
     setGeneratingSummary(true)
     try {
-      const summaryPrompt = `Analyze the dataset named "${dataset.name}".
+      let summaryPrompt = ""
+      if (['csv', 'xlsx', 'xls'].includes(dataset.file_type)) {
+        summaryPrompt = `Analyze the tabular dataset named "${dataset.name}".
 File type: ${dataset.file_type}
 Size: ${formatSize(dataset.size_bytes)}
 Rows: ${dataset.rows || 'Unknown'}
@@ -99,9 +104,62 @@ Columns: ${dataset.columns?.join(', ') || 'None'}
 Status: ${dataset.status}
 ${eda ? `EDA summary: missing values: ${eda.missing_values}, duplicates: ${eda.duplicates}` : ''}
 
-Provide a concise, professional analysis and recommend actions.`
+Generate a structured response with these EXACT headings:
+### Dataset Summary
+[Provide a clear overview of what the dataset contains, its purpose, and format]
+
+### Key Topics
+[Analyze the columns/data to identify the main themes or topics present]
+
+### Main Entities
+[Identify key entities, classes, or main categorical concepts]
+
+### Sentiment Overview
+[Provide a sentiment overview of the data columns or text targets]`
+      } else if (['txt', 'md', 'pdf', 'docx'].includes(dataset.file_type)) {
+        summaryPrompt = `Analyze the document dataset named "${dataset.name}".
+File type: ${dataset.file_type}
+Size: ${formatSize(dataset.size_bytes)}
+Lines/Paragraphs: ${dataset.metadata?.lines || dataset.metadata?.paragraphs || dataset.rows || 'Unknown'}
+Words: ${dataset.metadata?.words || 'Unknown'}
+Characters: ${dataset.metadata?.chars || 'Unknown'}
+Language: ${dataset.metadata?.language || 'English'}
+Average Sentence Length: ${dataset.metadata?.avg_sentence_len || 'Unknown'} words
+${eda?.top_keywords ? `Keywords: ${eda.top_keywords.join(', ')}` : ''}
+
+Generate a structured response with these EXACT headings:
+### Dataset Summary
+[Provide a clear overview of the document's content, purpose, and key takeaways]
+
+### Key Topics
+[Identify the main themes, chapters, or topics discussed in the document]
+
+### Main Entities
+[Identify the main entities (people, organizations, places, products) mentioned in the document]
+
+### Sentiment Overview
+[Analyze and describe the general tone, mood, or sentiment of the document]`
+      } else {
+        summaryPrompt = `Analyze the dataset named "${dataset.name}".
+File type: ${dataset.file_type}
+Size: ${formatSize(dataset.size_bytes)}
+Status: ${dataset.status}
+
+Generate a structured response with these EXACT headings:
+### Dataset Summary
+[Provide a clear overview of the file]
+
+### Key Topics
+[Identify main topics]
+
+### Main Entities
+[Identify main entities]
+
+### Sentiment Overview
+[Provide a general tone/sentiment assessment]`
+      }
       
-      const res = await multimodalAPI.summarize({ text: summaryPrompt, max_length: 200, style: "concise" })
+      const res = await multimodalAPI.summarize({ text: summaryPrompt, max_length: 500, style: "concise" })
       setAiSummary(res.data.summary)
     } catch (err) {
       toast.error('Failed to generate AI Summary')
@@ -164,9 +222,52 @@ Provide a concise, professional analysis and recommend actions.`
   }
 
   const isTabular = ['csv', 'xlsx', 'xls'].includes(dataset.file_type)
+  const isTxt = ['txt', 'md'].includes(dataset.file_type)
+  const isDoc = ['docx', 'pdf'].includes(dataset.file_type)
+  const isImg = ['jpg', 'jpeg', 'png', 'webp'].includes(dataset.file_type)
+
   const missingByColData = eda?.missing_by_column
     ? Object.entries(eda.missing_by_column).map(([name, missing]) => ({ name, missing }))
     : []
+
+  const wordFreqData = eda?.word_frequency
+    ? Object.entries(eda.word_frequency).map(([name, count]) => ({ name, count }))
+    : []
+  const sentLenData = eda?.sentence_length_distribution
+    ? Object.entries(eda.sentence_length_distribution).map(([name, count]) => ({ name, count }))
+    : []
+  const topKeywords = eda?.top_keywords || []
+
+  let stats = []
+  if (isTxt) {
+    stats = [
+      { label: 'Total Lines', value: dataset.metadata?.lines?.toLocaleString() || dataset.rows?.toLocaleString() || '—', color: '#7c3aed' },
+      { label: 'Total Words', value: dataset.metadata?.words?.toLocaleString() || '—', color: '#06b6d4' },
+      { label: 'Total Characters', value: dataset.metadata?.chars?.toLocaleString() || '—', color: '#f59e0b' },
+      { label: 'File Size', value: formatSize(dataset.size_bytes), color: '#10b981' },
+    ]
+  } else if (isDoc) {
+    stats = [
+      { label: 'Pages / Paragraphs', value: dataset.metadata?.pages?.toLocaleString() || dataset.metadata?.paragraphs?.toLocaleString() || dataset.rows?.toLocaleString() || '—', color: '#7c3aed' },
+      { label: 'Total Words', value: dataset.metadata?.words?.toLocaleString() || '—', color: '#06b6d4' },
+      { label: 'Total Characters', value: dataset.metadata?.chars?.toLocaleString() || '—', color: '#f59e0b' },
+      { label: 'File Size', value: formatSize(dataset.size_bytes), color: '#10b981' },
+    ]
+  } else if (isImg) {
+    stats = [
+      { label: 'Width', value: dataset.metadata?.width ? `${dataset.metadata.width} px` : '—', color: '#7c3aed' },
+      { label: 'Height', value: dataset.metadata?.height ? `${dataset.metadata.height} px` : '—', color: '#06b6d4' },
+      { label: 'Format / Mode', value: dataset.metadata?.format ? `${dataset.metadata.format} (${dataset.metadata.mode || ''})` : '—', color: '#f59e0b' },
+      { label: 'File Size', value: formatSize(dataset.size_bytes), color: '#10b981' },
+    ]
+  } else {
+    stats = [
+      { label: 'Total Rows', value: dataset.rows?.toLocaleString() || '—', color: '#7c3aed' },
+      { label: 'Columns', value: dataset.cols || '—', color: '#06b6d4' },
+      { label: 'Missing Values', value: eda?.missing_values?.toLocaleString() || '0', color: '#f59e0b' },
+      { label: 'Duplicates', value: eda?.duplicates?.toLocaleString() || '0', color: '#10b981' },
+    ]
+  }
 
   return (
     <div className="p-6 space-y-5 max-w-7xl mx-auto">
@@ -180,7 +281,14 @@ Provide a concise, professional analysis and recommend actions.`
           <div>
             <h1 className="text-lg font-bold" style={{ color: 'var(--text-primary)' }}>{dataset.name}</h1>
             <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
-              {dataset.rows ? `${dataset.rows.toLocaleString()} rows` : '—'} × {dataset.cols || '—'} columns ({formatSize(dataset.size_bytes)})
+              {isTxt
+                ? `${dataset.metadata?.lines?.toLocaleString() || dataset.rows?.toLocaleString() || '—'} lines × ${dataset.metadata?.words?.toLocaleString() || '—'} words (${formatSize(dataset.size_bytes)})`
+                : isDoc
+                  ? `${dataset.metadata?.pages || dataset.metadata?.paragraphs || dataset.rows || '—'} pages/paragraphs × ${dataset.metadata?.words?.toLocaleString() || '—'} words (${formatSize(dataset.size_bytes)})`
+                  : isImg
+                    ? `${dataset.metadata?.width || '—'} × ${dataset.metadata?.height || '—'} pixels (${formatSize(dataset.size_bytes)})`
+                    : `${dataset.rows ? `${dataset.rows.toLocaleString()} rows` : '—'} × ${dataset.cols || '—'} columns (${formatSize(dataset.size_bytes)})`
+              }
             </p>
           </div>
         </div>
@@ -217,12 +325,7 @@ Provide a concise, professional analysis and recommend actions.`
       {tab === 'Overview' && (
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-4">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {[
-              { label: 'Total Rows', value: dataset.rows?.toLocaleString() || '—', color: '#7c3aed' },
-              { label: 'Columns', value: dataset.cols || '—', color: '#06b6d4' },
-              { label: 'Missing Values', value: eda?.missing_values?.toLocaleString() || '0', color: '#f59e0b' },
-              { label: 'Duplicates', value: eda?.duplicates?.toLocaleString() || '0', color: '#10b981' },
-            ].map(({ label, value, color }) => (
+            {stats.map(({ label, value, color }) => (
               <div key={label} className="stat-card">
                 <p className="text-2xl font-bold" style={{ color }}>{value}</p>
                 <p className="text-xs" style={{ color: 'var(--text-muted)' }}>{label}</p>
@@ -230,15 +333,41 @@ Provide a concise, professional analysis and recommend actions.`
             ))}
           </div>
 
-          {!isTabular ? (
-            <div className="card p-5 text-center space-y-2">
-              <FileText className="mx-auto" size={32} style={{ color: 'var(--text-muted)' }} />
-              <h3 className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>Non-Tabular File</h3>
-              <p className="text-xs max-w-sm mx-auto" style={{ color: 'var(--text-muted)' }}>
-                This is a {dataset.file_type.toUpperCase()} file. Detailed Exploratory Data Analysis, distributions, and column statistical summaries are only supported for tabular CSV or Excel datasets.
-              </p>
+          {isImg && dataset.cloudinary_url && (
+            <div className="card p-5 flex flex-col items-center justify-center space-y-3">
+              <h3 className="font-semibold text-sm self-start" style={{ color: 'var(--text-primary)' }}>Image Preview</h3>
+              <img src={dataset.cloudinary_url} alt={dataset.name} className="max-w-md max-h-96 rounded-lg shadow-md border" style={{ borderColor: 'var(--border)' }} />
             </div>
-          ) : eda ? (
+          )}
+
+          {!isTabular && !isImg ? (
+            <div className="card p-5 space-y-4">
+              <div className="flex items-center gap-2">
+                <FileText size={18} style={{ color: 'var(--accent-primary)' }} />
+                <h3 className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>Document Metadata Breakdown</h3>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
+                <div className="p-3 bg-slate-800/10 border border-slate-700/20 rounded-lg">
+                  <p className="text-slate-400 font-medium">Language</p>
+                  <p className="text-sm font-semibold text-white mt-1">{dataset.metadata?.language || 'English'}</p>
+                </div>
+                <div className="p-3 bg-slate-800/10 border border-slate-700/20 rounded-lg">
+                  <p className="text-slate-400 font-medium">Avg Sentence Length</p>
+                  <p className="text-sm font-semibold text-white mt-1">
+                    {dataset.metadata?.avg_sentence_len ? `${dataset.metadata.avg_sentence_len} words` : '—'}
+                  </p>
+                </div>
+                <div className="p-3 bg-slate-800/10 border border-slate-700/20 rounded-lg">
+                  <p className="text-slate-400 font-medium">Total Words</p>
+                  <p className="text-sm font-semibold text-white mt-1">{dataset.metadata?.words?.toLocaleString() || '—'}</p>
+                </div>
+                <div className="p-3 bg-slate-800/10 border border-slate-700/20 rounded-lg">
+                  <p className="text-slate-400 font-medium">Total Characters</p>
+                  <p className="text-sm font-semibold text-white mt-1">{dataset.metadata?.chars?.toLocaleString() || '—'}</p>
+                </div>
+              </div>
+            </div>
+          ) : isTabular && eda ? (
             <div className="card p-5 space-y-3">
               <h3 className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>Columns & Statistical Summary</h3>
               <div className="overflow-x-auto">
@@ -280,9 +409,11 @@ Provide a concise, professional analysis and recommend actions.`
               </div>
             </div>
           ) : (
-            <div className="card p-5 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
-              No column statistical information available.
-            </div>
+            isTabular && (
+              <div className="card p-5 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
+                No column statistical information available.
+              </div>
+            )
           )}
         </motion.div>
       )}
@@ -327,9 +458,82 @@ Provide a concise, professional analysis and recommend actions.`
 
       {tab === 'EDA' && (
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-4">
-          {!isTabular ? (
+          {!isTabular && !['txt', 'md', 'pdf', 'docx'].includes(dataset.file_type) ? (
             <div className="card p-5 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
-              EDA charts are only supported for tabular CSV or Excel files.
+              EDA charts are only supported for document datasets (TXT, PDF, DOCX) and tabular CSV/Excel files.
+            </div>
+          ) : ['txt', 'md', 'pdf', 'docx'].includes(dataset.file_type) ? (
+            <div className="space-y-4">
+              {/* Word Frequency & Sentence Length charts */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="card p-5">
+                  <p className="font-semibold text-sm mb-4" style={{ color: 'var(--text-primary)' }}>
+                    Word Frequency Chart
+                  </p>
+                  {wordFreqData.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={wordFreqData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                        <XAxis dataKey="name" tick={{ fontSize: 10, fill: 'var(--text-muted)' }} axisLine={false} />
+                        <YAxis tick={{ fontSize: 10, fill: 'var(--text-muted)' }} axisLine={false} />
+                        <Tooltip />
+                        <Bar dataKey="count" fill="var(--accent-primary)" radius={[3, 3, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <p className="text-xs text-center py-8" style={{ color: 'var(--text-muted)' }}>No word frequency data available</p>
+                  )}
+                </div>
+
+                <div className="card p-5">
+                  <p className="font-semibold text-sm mb-4" style={{ color: 'var(--text-primary)' }}>
+                    Sentence Length Distribution
+                  </p>
+                  {sentLenData.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={sentLenData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                        <XAxis dataKey="name" tick={{ fontSize: 10, fill: 'var(--text-muted)' }} axisLine={false} />
+                        <YAxis tick={{ fontSize: 10, fill: 'var(--text-muted)' }} axisLine={false} />
+                        <Tooltip />
+                        <Bar dataKey="count" fill="#10b981" radius={[3, 3, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <p className="text-xs text-center py-8" style={{ color: 'var(--text-muted)' }}>No sentence length distribution data available</p>
+                  )}
+                </div>
+              </div>
+
+              {/* Top Keywords */}
+              <div className="card p-5 space-y-3">
+                <p className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>Top Keywords</p>
+                <div className="flex flex-wrap gap-2">
+                  {topKeywords.map((kw) => (
+                    <span key={kw} className="badge badge-violet py-1 px-3 text-xs font-semibold">
+                      {kw}
+                    </span>
+                  ))}
+                  {topKeywords.length === 0 && (
+                    <p className="text-xs" style={{ color: 'var(--text-muted)' }}>No keywords extracted.</p>
+                  )}
+                </div>
+              </div>
+
+              {/* Document Statistics Summary */}
+              <div className="card p-5 grid grid-cols-2 md:grid-cols-4 gap-4">
+                {[
+                  { label: 'Language', value: eda?.metadata?.language || 'English', color: '#7c3aed' },
+                  { label: 'Avg Sentence Length', value: eda?.metadata?.avg_sentence_len ? `${eda.metadata.avg_sentence_len} words` : '—', color: '#06b6d4' },
+                  { label: 'Total Words', value: eda?.metadata?.words?.toLocaleString() || '—', color: '#f59e0b' },
+                  { label: 'Total Characters', value: eda?.metadata?.chars?.toLocaleString() || '—', color: '#10b981' },
+                ].map(({ label, value, color }) => (
+                  <div key={label} className="stat-card border-none bg-slate-800/10">
+                    <p className="text-xl font-bold" style={{ color }}>{value}</p>
+                    <p className="text-xs" style={{ color: 'var(--text-muted)' }}>{label}</p>
+                  </div>
+                ))}
+              </div>
             </div>
           ) : missingByColData.length === 0 ? (
             <div className="card p-5 text-center text-xs space-y-1">

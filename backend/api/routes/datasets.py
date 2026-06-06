@@ -167,15 +167,16 @@ async def get_eda(dataset_id: str, current_user=Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="Dataset not processed yet")
 
     temp_path = None
+    is_temp = False
     try:
-        from services.dataset_service import download_file_from_cloudinary
-        temp_path = await download_file_from_cloudinary(d["cloudinary_url"])
+        from services.dataset_service import get_dataset_file
+        temp_path, is_temp = await get_dataset_file(d)
         eda = await run_eda(temp_path, d.get("file_type", ""))
         return eda
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if temp_path and os.path.exists(temp_path):
+        if temp_path and is_temp and os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
             except Exception as clean_err:
@@ -194,9 +195,10 @@ async def get_preview(
         raise HTTPException(status_code=404, detail="Dataset not found")
 
     temp_path = None
+    is_temp = False
     try:
-        from services.dataset_service import download_file_from_cloudinary
-        temp_path = await download_file_from_cloudinary(d["cloudinary_url"])
+        from services.dataset_service import get_dataset_file
+        temp_path, is_temp = await get_dataset_file(d)
         
         import pandas as pd
         ext = d["file_type"]
@@ -282,9 +284,8 @@ async def get_preview(
     except Exception as e:
         return {"columns": [], "rows": [], "error": str(e)}
     finally:
-        if temp_path and os.path.exists(temp_path):
+        if temp_path and is_temp and os.path.exists(temp_path):
             try:
-                if d.get("gridfs_id") and str(d.get("gridfs_id")) in temp_path:
-                    os.remove(temp_path)
+                os.remove(temp_path)
             except Exception as clean_err:
                 logger.error(f"Failed to delete temp file {temp_path}: {clean_err}")
