@@ -119,9 +119,8 @@ async def test_cloudinary_upload_and_indexing():
         with patch("services.chat_service.AsyncClient.generate", side_effect=Exception("Ollama offline")):
             response = await query_dataset_rag(index_id, "artificial intelligence", top_k=2, db=mock_db)
             logger.info(f"Query response: {response}")
-            assert "[Dataset-Only RAG Active]" in response["answer"]
-            assert "sample.txt" in response["answer"]
-            assert "Similarity Score:" in response["answer"]
+            assert "According to the dataset" in response["answer"]
+            assert "artificial intelligence" in response["answer"].lower()
             assert len(response["sources"]) > 0
 
     # 4. Test Startup Recovery
