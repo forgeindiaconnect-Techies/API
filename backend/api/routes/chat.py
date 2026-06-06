@@ -402,6 +402,10 @@ async def stream_message(
             logger.error(f"Error querying vector store: {e}")
 
     # Generate answer from context (ChromaDB similarity search matches)
+    from vector_db.store import get_embedding_model
+    embedder = get_embedding_model()
+    is_mock = embedder.__class__.__name__ == "MockEmbedder"
+
     async def generate_response():
         try:
             # Check if context was selected at all
@@ -410,8 +414,9 @@ async def stream_message(
             else:
                 best_match = None
                 if results:
-                    # Filter matches with score >= 0.30
-                    matches = [r for r in results if r.score >= 0.30]
+                    # Filter matches: if mock embedder, ignore score threshold since scores will be low random values
+                    threshold = 0.0 if is_mock else 0.30
+                    matches = [r for r in results if r.score >= threshold]
                     if matches:
                         best_match = matches[0]
 
@@ -424,6 +429,14 @@ async def stream_message(
                         f"**Matching Chunk:** {best_match.content}\n"
                         f"**Similarity Score:** {best_match.score:.4f}"
                     )
+                    if is_mock:
+                        answer_content += (
+                            "\n\n"
+                            "> ⚠️ **Demo Mode Active:** The server is running on Render's free/starter tier "
+                            "and has bypassed heavy local models to avoid memory limit crashes. "
+                            "To get real semantic search results, please configure a valid `OPENAI_API_KEY` "
+                            "in your Render dashboard environment variables."
+                        )
                 else:
                     # Return: 'No relevant information found in the uploaded dataset.'
                     answer_content = "No relevant information found in the uploaded dataset."
