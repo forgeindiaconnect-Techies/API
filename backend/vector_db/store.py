@@ -275,12 +275,21 @@ class MockEmbedder:
 def get_embedding_model(model_name: str = "all-MiniLM-L6-v2"):
     """Load embedding model with fallbacks to OpenAI and MockEmbedder to ensure zero crashes"""
     # 1. Try OpenAI if API key is present
-    if settings.OPENAI_API_KEY:
+    if settings.OPENAI_API_KEY and not settings.OPENAI_API_KEY.startswith("sk-..."):
         try:
             logger.info("Initializing OpenAIEmbedder...")
             return OpenAIEmbedder(api_key=settings.OPENAI_API_KEY)
         except Exception as e:
             logger.error(f"Failed to initialize OpenAIEmbedder: {e}. Falling back to SentenceTransformer.")
+
+    # Detect if we are on Render with memory limitations, or if disabled via env var
+    is_render = os.environ.get("RENDER") == "true" or "RENDER_SERVICE_ID" in os.environ
+    disable_local = os.environ.get("DISABLE_LOCAL_EMBEDDINGS", "").lower() in ("true", "1", "yes")
+    
+    if (is_render or disable_local) and (not settings.OPENAI_API_KEY or settings.OPENAI_API_KEY.startswith("sk-...")):
+        logger.warning("Running in a low-memory/Render environment without a valid OpenAI API key. "
+                       "Bypassing SentenceTransformer import to avoid OOM crash; falling back directly to MockEmbedder.")
+        return MockEmbedder()
 
     # 2. Try SentenceTransformer
     try:

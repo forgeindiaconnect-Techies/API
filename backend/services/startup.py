@@ -18,6 +18,19 @@ async def run_startup_checks(app: FastAPI):
             logger.warning("Database not connected. Skipping startup RAG index check.")
             return
 
+        # Clean up stale "building" indexes: reset them to "error" with an explanation
+        result = await db.rag_indexes.update_many(
+            {"status": "building"},
+            {
+                "$set": {
+                    "status": "error",
+                    "error": "Index build was interrupted (server restart or memory limit exceeded)."
+                }
+            }
+        )
+        if result.modified_count > 0:
+            logger.info(f"Cleaned up {result.modified_count} stale 'building' indexes and set their status to 'error'.")
+
         cursor = db.rag_indexes.find({"status": "ready"})
         async for index in cursor:
             index_id = str(index["_id"])
