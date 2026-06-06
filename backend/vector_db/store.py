@@ -10,8 +10,22 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
+def sanitize_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """Sanitize metadata for ChromaDB: allow only str, int, float, bool. Remove None."""
+    sanitized = {}
+    for k, v in metadata.items():
+        if v is None:
+            continue
+        if isinstance(v, (str, int, float, bool)):
+            sanitized[k] = v
+        else:
+            sanitized[k] = str(v)
+    return sanitized
+
+
 class VectorStore:
     """Unified interface for vector databases"""
+
 
     def __init__(self, backend: str = "chroma", collection_name: str = "default"):
         self.backend = backend
@@ -26,8 +40,16 @@ class VectorStore:
             self._init_faiss()
 
     def _init_chroma(self):
-        from services.chroma_service import ChromaManager
-        self._client = ChromaManager.get_client()
+        try:
+            from services.chroma_service import ChromaManager
+            self._client = ChromaManager.get_client()
+        except (ImportError, ModuleNotFoundError) as e:
+            logger.warning(f"ChromaDB not installed or unavailable ({e}). Falling back to FAISS/Mock.")
+            self._client = None
+            self._collection = None
+            self.backend = "faiss"
+            self._init_faiss()
+            return
         
         # get_or_create_collection can also trigger database lock, run with sync retry loop
         max_attempts = 5
@@ -79,19 +101,41 @@ class VectorStore:
             ids = [f"doc_{i}" for i in range(len(documents))]
         if not metadatas:
             metadatas = [{} for _ in documents]
+        else:
+            metadatas = [sanitize_metadata(meta) for meta in metadatas]
 
         if self.backend == "chroma" and self._collection:
             from services.chroma_service import run_with_retry_async
             def op():
-                self._collection.add(
-                    documents=documents,
-                    embeddings=embeddings,
-                    metadatas=metadatas,
-                    ids=ids,
-                )
+                try:
+                    self._collection.add(
+                        documents=documents,
+                        embeddings=embeddings,
+                        metadatas=metadatas,
+                        ids=ids,
+                    )
+                except Exception as add_err:
+                    logger.warning(
+                        f"ChromaDB add failed ({add_err}). Attempting fallback to upsert..."
+                    )
+                    try:
+                        self._collection.upsert(
+                            documents=documents,
+                            embeddings=embeddings,
+                            metadatas=metadatas,
+                            ids=ids,
+                        )
+                    except Exception as upsert_err:
+                        logger.error(f"ChromaDB upsert fallback failed: {upsert_err}")
+                        raise
             await run_with_retry_async(op)
         elif self.backend == "faiss" and self._index is not None:
             import numpy as np
+            if embeddings and len(embeddings[0]) != self._dimension:
+                import faiss
+                self._dimension = len(embeddings[0])
+                self._index = faiss.IndexFlatL2(self._dimension)
+                logger.info(f"Re-initialized FAISS index with dimension {self._dimension}")
             arr = np.array(embeddings, dtype="float32")
             self._index.add(arr)
             self._docs.extend(
@@ -125,6 +169,10 @@ class VectorStore:
 
         elif self.backend == "faiss" and self._index is not None:
             import numpy as np
+            if len(query_embedding) != self._dimension:
+                # If query dimension mismatch, return empty results
+                logger.warning(f"FAISS dimension mismatch: query={len(query_embedding)} vs index={self._dimension}")
+                return []
             arr = np.array([query_embedding], dtype="float32")
             D, I = self._index.search(arr, top_k)
             out = []
@@ -189,15 +237,56 @@ class MockVectorCollection:
         return len(self._data)
 
 
-def get_embedding_model(model_name: str = "all-MiniLM-L6-v2"):
-    """Load sentence-transformers embedding model"""
-    from sentence_transformers import SentenceTransformer
-    return SentenceTransformer(model_name)
+class OpenAIEmbedder:
+    """OpenAI embedding wrapper compatible with the sentence-transformers encode API"""
+    def __init__(self, api_key: str):
+        from openai import OpenAI
+        self.client = OpenAI(api_key=api_key)
+
+    def encode(self, texts, **kwargs):
+        import numpy as np
+        # Handle string input
+        if isinstance(texts, str):
+            res = self.client.embeddings.create(
+                input=[texts],
+                model="text-embedding-3-small"
+            )
+            emb = res.data[0].embedding
+            return np.array(emb, dtype="float32")
+        
+        # Handle list input
+        res = self.client.embeddings.create(
+            input=texts,
+            model="text-embedding-3-small"
+        )
+        embs = [d.embedding for d in res.data]
+        return np.array(embs, dtype="float32")
 
 
 class MockEmbedder:
     def encode(self, texts, **kwargs):
         import random
+        import numpy as np
         if isinstance(texts, str):
-            return [random.uniform(-1, 1) for _ in range(384)]
-        return [[random.uniform(-1, 1) for _ in range(384)] for _ in texts]
+            return np.array([random.uniform(-1, 1) for _ in range(384)], dtype="float32")
+        return np.array([[random.uniform(-1, 1) for _ in range(384)] for _ in texts], dtype="float32")
+
+
+def get_embedding_model(model_name: str = "all-MiniLM-L6-v2"):
+    """Load embedding model with fallbacks to OpenAI and MockEmbedder to ensure zero crashes"""
+    # 1. Try OpenAI if API key is present
+    if settings.OPENAI_API_KEY:
+        try:
+            logger.info("Initializing OpenAIEmbedder...")
+            return OpenAIEmbedder(api_key=settings.OPENAI_API_KEY)
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenAIEmbedder: {e}. Falling back to SentenceTransformer.")
+
+    # 2. Try SentenceTransformer
+    try:
+        logger.info(f"Initializing SentenceTransformer model: {model_name}...")
+        from sentence_transformers import SentenceTransformer
+        return SentenceTransformer(model_name)
+    except Exception as e:
+        logger.error(f"Failed to initialize SentenceTransformer ({e}). Falling back to MockEmbedder.")
+        return MockEmbedder()

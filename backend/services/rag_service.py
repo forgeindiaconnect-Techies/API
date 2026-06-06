@@ -1,5 +1,6 @@
 import logging
 import os
+import asyncio
 from datetime import datetime
 from database import get_db
 
@@ -104,7 +105,10 @@ async def _build_index(index_id: str, config: dict, db):
             batch_size = 32
             for i in range(0, len(chunks), batch_size):
                 batch = chunks[i:i+batch_size]
-                batch_embeds = embedder.encode(batch)
+                if asyncio.iscoroutinefunction(embedder.encode):
+                    batch_embeds = await embedder.encode(batch)
+                else:
+                    batch_embeds = await asyncio.to_thread(embedder.encode, batch)
                 if hasattr(batch_embeds, "tolist"):
                     batch_embeds = batch_embeds.tolist()
                 embeddings.extend(batch_embeds)
@@ -146,7 +150,13 @@ async def query_vector_store(index_id: str, query: str, top_k: int, db) -> list:
 
     from vector_db.store import VectorStore, get_embedding_model
     embedder = get_embedding_model(index.get("embedding_model", "all-MiniLM-L6-v2"))
-    query_emb = embedder.encode(query)
+    if hasattr(embedder, "encode"):
+        if asyncio.iscoroutinefunction(embedder.encode):
+            query_emb = await embedder.encode(query)
+        else:
+            query_emb = await asyncio.to_thread(embedder.encode, query)
+    else:
+        query_emb = []
     if hasattr(query_emb, "tolist"):
         query_emb = query_emb.tolist()
 

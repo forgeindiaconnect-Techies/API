@@ -42,7 +42,7 @@ class RAGPipeline:
             for i in range(len(chunks))
         ]
 
-        count = self.vector_store.add_documents(
+        count = await self.vector_store.add_documents(
             documents=chunks,
             embeddings=embeddings.tolist() if hasattr(embeddings, "tolist") else embeddings,
             metadatas=metadatas,

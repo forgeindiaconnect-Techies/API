@@ -320,6 +320,15 @@ async def ensure_dataset_indexed(dataset_id: str, db) -> str:
         await db.rag_indexes.update_one({"_id": index_id}, {"$set": {"status": "error", "error": str(e)}})
         raise HTTPException(status_code=500, detail=f"Failed to index dataset: {str(e)}")
 
+    # Verify if the index built successfully
+    final_index = await db.rag_indexes.find_one({"_id": index_id})
+    if not final_index or final_index.get("status") != "ready":
+        err_msg = final_index.get("error") if final_index else "Unknown indexing error"
+        raise HTTPException(
+            status_code=500,
+            detail=f"Dataset indexing failed. Status: {final_index.get('status') if final_index else 'missing'}. Error: {err_msg}"
+        )
+
     return index_id
 
 
@@ -394,55 +403,60 @@ async def stream_message(
 
     # Generate answer from context (ChromaDB similarity search matches)
     async def generate_response():
-        # Check if context was selected at all
-        if not data.dataset_id and not data.index_id:
-            answer_content = "Please select a dataset file from the 'Add Context' dropdown above to begin searching."
-        else:
-            best_match = None
-            if results:
-                # Filter matches with score >= 0.30
-                matches = [r for r in results if r.score >= 0.30]
-                if matches:
-                    best_match = matches[0]
-
-            if best_match:
-                # Return the exact information from the uploaded dataset
-                answer_content = (
-                    f"{best_match.content}\n\n"
-                    f"---\n"
-                    f"**Source File Name:** {best_match.source}\n"
-                    f"**Matching Chunk:** {best_match.content}\n"
-                    f"**Similarity Score:** {best_match.score:.4f}"
-                )
+        try:
+            # Check if context was selected at all
+            if not data.dataset_id and not data.index_id:
+                answer_content = "Please select a dataset file from the 'Add Context' dropdown above to begin searching."
             else:
-                # Return: 'No relevant information found in the uploaded dataset.'
-                answer_content = "No relevant information found in the uploaded dataset."
+                best_match = None
+                if results:
+                    # Filter matches with score >= 0.30
+                    matches = [r for r in results if r.score >= 0.30]
+                    if matches:
+                        best_match = matches[0]
 
-        # Stream response chunk by chunk for visual streaming effect
-        words = answer_content.split(" ")
-        accumulated = ""
-        for i, word in enumerate(words):
-            token = word + (" " if i < len(words) - 1 else "")
-            accumulated += token
-            yield f"data: {json.dumps({'token': token})}\n\n"
-            await asyncio.sleep(0.01)
+                if best_match:
+                    # Return the exact information from the uploaded dataset
+                    answer_content = (
+                        f"{best_match.content}\n\n"
+                        f"---\n"
+                        f"**Source File Name:** {best_match.source}\n"
+                        f"**Matching Chunk:** {best_match.content}\n"
+                        f"**Similarity Score:** {best_match.score:.4f}"
+                    )
+                else:
+                    # Return: 'No relevant information found in the uploaded dataset.'
+                    answer_content = "No relevant information found in the uploaded dataset."
 
-        # Save assistant message to DB
-        ai_msg = {
-            "role": "assistant",
-            "content": answer_content,
-            "conversation_id": conversation_id,
-            "user_id": str(current_user["_id"]),
-            "created_at": datetime.utcnow(),
-        }
-        await db.messages.insert_one(ai_msg)
+            # Stream response chunk by chunk for visual streaming effect
+            words = answer_content.split(" ")
+            accumulated = ""
+            for i, word in enumerate(words):
+                token = word + (" " if i < len(words) - 1 else "")
+                accumulated += token
+                yield f"data: {json.dumps({'token': token})}\n\n"
+                await asyncio.sleep(0.01)
 
-        # Update conversation message count and updated_at
-        await db.conversations.update_one(
-            {"_id": conversation_id},
-            {"$set": {"updated_at": datetime.utcnow()}, "$inc": {"message_count": 2}}
-        )
-        yield "data: [DONE]\n\n"
+            # Save assistant message to DB
+            ai_msg = {
+                "role": "assistant",
+                "content": answer_content,
+                "conversation_id": conversation_id,
+                "user_id": str(current_user["_id"]),
+                "created_at": datetime.utcnow(),
+            }
+            await db.messages.insert_one(ai_msg)
+
+            # Update conversation message count and updated_at
+            await db.conversations.update_one(
+                {"_id": conversation_id},
+                {"$set": {"updated_at": datetime.utcnow()}, "$inc": {"message_count": 2}}
+            )
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            logger.error(f"Error in stream generation: {e}", exc_info=True)
+            yield f"data: {json.dumps({'error': f'Stream generation failed: {str(e)}'})}\n\n"
+            yield "data: [DONE]\n\n"
 
     origin = request.headers.get("origin") if request is not None else None
     allowed_origins = [
