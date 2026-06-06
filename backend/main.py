@@ -185,6 +185,28 @@ async def info():
     }
 
 
+@app.get("/api/v1/test-embedder")
+async def test_embedder():
+    from vector_db.store import get_embedding_model
+    import numpy as np
+    import os
+    embedder = get_embedding_model()
+    
+    # Test encoding
+    test_text = "test query"
+    emb = embedder.encode(test_text)
+    
+    return {
+        "class_name": embedder.__class__.__name__,
+        "vector_type": str(type(emb)),
+        "vector_len": len(emb) if hasattr(emb, "__len__") else None,
+        "is_numpy": isinstance(emb, np.ndarray),
+        "is_render_env": os.environ.get("RENDER") == "true" or os.environ.get("RENDER_SERVICE_ID") is not None,
+        "disable_local_env": os.environ.get("DISABLE_LOCAL_EMBEDDINGS") == "true",
+        "openai_key_configured": bool(settings.OPENAI_API_KEY and not settings.OPENAI_API_KEY.startswith("sk-..."))
+    }
+
+
 # ─── Generated Inference Endpoints ────────────────────────────────────────────
 # These are the auto-generated endpoints mentioned in the spec
 
