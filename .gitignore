@@ -46,3 +46,7 @@ logs/
 
 # Docker
 .docker/
+
+# IDE configs
+pyrightconfig.json
+
