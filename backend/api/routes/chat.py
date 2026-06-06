@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from datetime import datetime
 from typing import List, Optional
@@ -158,6 +158,15 @@ async def ensure_dataset_indexed(dataset_id: str, db) -> str:
     except Exception as e:
         logger.error(f"Failed to auto-index dataset {dataset_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to index dataset: {str(e)}")
+
+
+@router.options("/conversations/{conversation_id}/stream")
+async def options_stream_message(conversation_id: str, response: Response):
+    response.headers["Access-Control-Allow-Origin"] = "https://d-ai-nu.vercel.app"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "*"
+    return response
 
 
 @router.post("/conversations/{conversation_id}/stream")
