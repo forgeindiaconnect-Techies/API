@@ -20,6 +20,14 @@ async def run_startup_recovery():
         async for dataset in datasets_cursor:
             dataset_id = str(dataset["_id"])
             
+            # Skip legacy datasets that do not have a Cloudinary URL
+            if not dataset.get("cloudinary_url"):
+                logger.warning(
+                    f"Startup recovery: Dataset '{dataset.get('name') or dataset.get('file_name')}' ({dataset_id}) "
+                    f"does not have a Cloudinary URL. Skipping automated index rebuild."
+                )
+                continue
+
             # Find RAG index document
             index_doc = await db.rag_indexes.find_one({"dataset_id": dataset_id})
             if not index_doc:
