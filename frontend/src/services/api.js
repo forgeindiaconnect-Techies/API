@@ -80,8 +80,9 @@ export const chatAPI = {
     const refreshToken = localStorage.getItem("refresh_token") || useAuthStore.getState().refreshToken
     const { setAuth, logout } = useAuthStore.getState()
     
+    const cleanId = id ? id.toString().replace(/\/+$/, '') : ''
     const executeFetch = (accessToken) => {
-      return fetch(`${BASE_URL}/chat/conversations/${id}/stream`, {
+      return fetch(`${BASE_URL}/chat/conversations/${cleanId}/stream`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
