@@ -404,7 +404,7 @@ async def stream_message(
     # Generate answer from context (ChromaDB similarity search matches)
     from vector_db.store import get_embedding_model
     embedder = get_embedding_model()
-    is_mock = embedder.__class__.__name__ == "MockEmbedder"
+    is_local_search = embedder.__class__.__name__ == "HashingTFIDFEmbedder"
 
     async def generate_response():
         try:
@@ -414,8 +414,8 @@ async def stream_message(
             else:
                 best_match = None
                 if results:
-                    # Filter matches: if mock embedder, ignore score threshold since scores will be low random values
-                    threshold = 0.0 if is_mock else 0.30
+                    # Filter matches: if local hashing search is active, use a threshold of 0.20 for keyword matches
+                    threshold = 0.20 if is_local_search else 0.30
                     matches = [r for r in results if r.score >= threshold]
                     if matches:
                         best_match = matches[0]
@@ -429,13 +429,12 @@ async def stream_message(
                         f"**Matching Chunk:** {best_match.content}\n"
                         f"**Similarity Score:** {best_match.score:.4f}"
                     )
-                    if is_mock:
+                    if is_local_search:
                         answer_content += (
                             "\n\n"
-                            "> ⚠️ **Demo Mode Active:** The server is running on Render's free/starter tier "
-                            "and has bypassed heavy local models to avoid memory limit crashes. "
-                            "To get real semantic search results, please configure a valid `OPENAI_API_KEY` "
-                            "in your Render dashboard environment variables."
+                            "> ℹ️ **Local Search Active:** Running in low-memory environment without an API key. "
+                            "Using local feature-hashing keyword matching. Configure `OPENAI_API_KEY` on Render "
+                            "for full semantic search."
                         )
                 else:
                     # Return: 'No relevant information found in the uploaded dataset.'

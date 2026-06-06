@@ -263,17 +263,50 @@ class OpenAIEmbedder:
         return np.array(embs, dtype="float32")
 
 
-class MockEmbedder:
+class HashingTFIDFEmbedder:
+    """A lightweight, local embedder using signed feature hashing TF-IDF.
+    Fits in < 1MB RAM, requires no PyTorch/SentenceTransformer, and gives true keyword similarity."""
+    def __init__(self, dimension: int = 384):
+        self.dimension = dimension
+
     def encode(self, texts, **kwargs):
-        import random
         import numpy as np
-        if isinstance(texts, str):
-            return np.array([random.uniform(-1, 1) for _ in range(384)], dtype="float32")
-        return np.array([[random.uniform(-1, 1) for _ in range(384)] for _ in texts], dtype="float32")
+        import hashlib
+        import re
+
+        is_single = isinstance(texts, str)
+        if is_single:
+            texts = [texts]
+
+        stop_words = {"the", "a", "an", "and", "or", "but", "is", "are", "was", "were", "to", "of", "in", "for", "on", "with", "at", "by"}
+
+        embeddings = []
+        for text in texts:
+            words = re.findall(r'\w+', text.lower())
+            tf = {}
+            for w in words:
+                if w not in stop_words:
+                    tf[w] = tf.get(w, 0) + 1
+
+            vec = np.zeros(self.dimension, dtype="float32")
+            for w, freq in tf.items():
+                h = int(hashlib.md5(w.encode("utf-8")).hexdigest(), 16)
+                idx = h % self.dimension
+                sign = 1 if ((h >> 8) & 1) else -1
+                vec[idx] += sign * freq
+
+            norm = np.linalg.norm(vec)
+            if norm > 0:
+                vec = vec / norm
+            embeddings.append(vec)
+
+        if is_single:
+            return embeddings[0]
+        return np.array(embeddings, dtype="float32")
 
 
 def get_embedding_model(model_name: str = "all-MiniLM-L6-v2"):
-    """Load embedding model with fallbacks to OpenAI and MockEmbedder to ensure zero crashes"""
+    """Load embedding model with fallbacks to OpenAI and HashingTFIDFEmbedder to ensure zero crashes"""
     # 1. Try OpenAI if API key is present
     if settings.OPENAI_API_KEY and not settings.OPENAI_API_KEY.startswith("sk-..."):
         try:
@@ -288,8 +321,8 @@ def get_embedding_model(model_name: str = "all-MiniLM-L6-v2"):
     
     if (is_render or disable_local) and (not settings.OPENAI_API_KEY or settings.OPENAI_API_KEY.startswith("sk-...")):
         logger.warning("Running in a low-memory/Render environment without a valid OpenAI API key. "
-                       "Bypassing SentenceTransformer import to avoid OOM crash; falling back directly to MockEmbedder.")
-        return MockEmbedder()
+                       "Bypassing SentenceTransformer import to avoid OOM crash; falling back directly to HashingTFIDFEmbedder.")
+        return HashingTFIDFEmbedder(384)
 
     # 2. Try SentenceTransformer
     try:
@@ -297,5 +330,5 @@ def get_embedding_model(model_name: str = "all-MiniLM-L6-v2"):
         from sentence_transformers import SentenceTransformer
         return SentenceTransformer(model_name)
     except Exception as e:
-        logger.error(f"Failed to initialize SentenceTransformer ({e}). Falling back to MockEmbedder.")
-        return MockEmbedder()
+        logger.error(f"Failed to initialize SentenceTransformer ({e}). Falling back to HashingTFIDFEmbedder.")
+        return HashingTFIDFEmbedder(384)
