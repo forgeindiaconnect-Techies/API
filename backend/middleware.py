@@ -120,6 +120,7 @@ class AuthMiddleware:
         # 3. Extract and validate Bearer Token
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
+            logger.warning(f"AuthMiddleware: Request to protected path '{path}' missing Bearer Token")
             response = self._cors_response(
                 origin, 401,
                 {"detail": "Not authenticated"},
@@ -133,23 +134,29 @@ class AuthMiddleware:
             payload = decode_token(token, expected_type="access")
             user_id = payload.get("sub")
             if not user_id:
+                logger.warning(f"AuthMiddleware: Token sub payload missing user_id for token on path '{path}'")
                 response = self._cors_response(origin, 401, {"detail": "Invalid token payload"})
                 await response(scope, receive, send)
                 return
 
             db = get_db()
             if db is None:
+                logger.error(f"AuthMiddleware: Database connection unavailable when validating token for sub: {user_id}")
                 response = self._cors_response(origin, 500, {"detail": "Database connection unavailable"})
                 await response(scope, receive, send)
                 return
 
-            user = await db.users.find_one({"_id": user_id})
+            # Support both string and ObjectId formats for the user _id lookup
+            user_query = {"_id": {"$in": [user_id, ObjectId(user_id)]} if len(user_id) == 24 else user_id}
+            user = await db.users.find_one(user_query)
             if not user:
+                logger.warning(f"AuthMiddleware: User not found in database for sub: {user_id}")
                 response = self._cors_response(origin, 401, {"detail": "User not found"})
                 await response(scope, receive, send)
                 return
 
             if user.get("disabled"):
+                logger.warning(f"AuthMiddleware: Account disabled for user: {user_id}")
                 response = self._cors_response(origin, 400, {"detail": "Account disabled"})
                 await response(scope, receive, send)
                 return
@@ -157,8 +164,10 @@ class AuthMiddleware:
             # Attach user to request state
             scope["state"] = scope.get("state", {})
             scope["state"]["user"] = user
+            logger.info(f"AuthMiddleware: Successfully authenticated user: {user.get('email')} (ID: {user_id})")
 
         except HTTPException as he:
+            logger.warning(f"AuthMiddleware: HTTPException during token validation for path '{path}': {he.detail}")
             response = self._cors_response(
                 origin, he.status_code,
                 {"detail": he.detail},
@@ -167,7 +176,7 @@ class AuthMiddleware:
             await response(scope, receive, send)
             return
         except Exception as e:
-            logger.error(f"AuthMiddleware error: {e}")
+            logger.error(f"AuthMiddleware: Unexpected authentication error: {e}", exc_info=True)
             response = self._cors_response(
                 origin, 401,
                 {"detail": f"Authentication failed: {str(e)}"},

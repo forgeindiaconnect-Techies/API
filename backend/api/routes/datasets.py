@@ -40,11 +40,50 @@ def fmt_dataset(d: dict) -> dict:
     }
 
 
+def get_user_query(current_user: dict) -> dict:
+    user_id_str = str(current_user["_id"])
+    if len(user_id_str) == 24:
+        try:
+            return {"$in": [user_id_str, ObjectId(user_id_str)]}
+        except Exception:
+            return user_id_str
+    return user_id_str
+
+
+async def fetch_user_dataset_or_raise(dataset_id: str, current_user: dict) -> dict:
+    logger.info(f"Fetching dataset details for ID: {dataset_id} | User: {current_user.get('_id')}")
+    try:
+        oid = ObjectId(dataset_id)
+        id_query = {"$in": [oid, dataset_id]}
+    except (InvalidId, Exception):
+        logger.warning(f"Invalid dataset ID format: {dataset_id}")
+        id_query = dataset_id
+
+    db = get_db()
+    if db is None:
+        logger.error("Database connection wrapper is None")
+        raise HTTPException(status_code=500, detail="Database connection unavailable")
+
+    user_query = get_user_query(current_user)
+    d = await db.datasets.find_one({"_id": id_query, "user_id": user_query})
+    if not d:
+        logger.warning(f"Dataset not found or unauthorized: ID={dataset_id}, User={current_user.get('_id')}")
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    
+    logger.info(f"Successfully retrieved dataset: {d.get('name')} (ID: {d.get('_id')})")
+    return d
+
+
 @router.get("")
 async def list_datasets(current_user=Depends(get_current_user)):
     db = get_db()
+    if db is None:
+        logger.error("Database connection wrapper is None")
+        raise HTTPException(status_code=500, detail="Database connection unavailable")
+    
     datasets = []
-    async for d in db.datasets.find({"user_id": str(current_user["_id"])}):
+    user_query = get_user_query(current_user)
+    async for d in db.datasets.find({"user_id": user_query}):
         datasets.append(fmt_dataset(d))
     return sorted(datasets, key=lambda x: x["created_at"], reverse=True)
 
@@ -130,27 +169,13 @@ async def upload_dataset(
 
 @router.get("/{dataset_id}")
 async def get_dataset(dataset_id: str, current_user=Depends(get_current_user)):
-    try:
-        oid = ObjectId(dataset_id)
-    except (InvalidId, Exception):
-        raise HTTPException(status_code=400, detail=f"Invalid dataset ID format: {dataset_id}")
-    db = get_db()
-    d = await db.datasets.find_one({"_id": oid, "user_id": str(current_user["_id"])})
-    if not d:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+    d = await fetch_user_dataset_or_raise(dataset_id, current_user)
     return fmt_dataset(d)
 
 
 @router.delete("/{dataset_id}")
 async def delete_dataset(dataset_id: str, current_user=Depends(get_current_user)):
-    try:
-        oid = ObjectId(dataset_id)
-    except (InvalidId, Exception):
-        raise HTTPException(status_code=400, detail=f"Invalid dataset ID format: {dataset_id}")
-    db = get_db()
-    d = await db.datasets.find_one({"_id": oid, "user_id": str(current_user["_id"])})
-    if not d:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+    d = await fetch_user_dataset_or_raise(dataset_id, current_user)
 
     # Delete from Cloudinary
     public_id = d.get("public_id")
@@ -164,7 +189,12 @@ async def delete_dataset(dataset_id: str, current_user=Depends(get_current_user)
         except Exception as e:
             logger.error(f"Failed to delete Cloudinary file {public_id}: {e}")
 
-    await db.datasets.delete_one({"_id": oid})
+    db = get_db()
+    if db is None:
+        logger.error("Database connection wrapper is None")
+        raise HTTPException(status_code=500, detail="Database connection unavailable")
+    
+    await db.datasets.delete_one({"_id": d["_id"]})
     return {"message": "Dataset deleted"}
 
 
@@ -175,16 +205,13 @@ async def reprocess_dataset(
     background_tasks: BackgroundTasks,
     current_user=Depends(get_current_user),
 ):
-    try:
-        oid = ObjectId(dataset_id)
-    except (InvalidId, Exception):
-        raise HTTPException(status_code=400, detail=f"Invalid dataset ID format: {dataset_id}")
+    d = await fetch_user_dataset_or_raise(dataset_id, current_user)
     db = get_db()
-    d = await db.datasets.find_one({"_id": oid, "user_id": str(current_user["_id"])})
-    if not d:
-        raise HTTPException(status_code=404, detail="Dataset not found")
-
-    await db.datasets.update_one({"_id": oid}, {"$set": {"status": "processing"}})
+    if db is None:
+        logger.error("Database connection wrapper is None")
+        raise HTTPException(status_code=500, detail="Database connection unavailable")
+        
+    await db.datasets.update_one({"_id": d["_id"]}, {"$set": {"status": "processing"}})
     from services.dataset_service import build_index_for_dataset
     background_tasks.add_task(
         build_index_for_dataset, d, db
@@ -194,14 +221,7 @@ async def reprocess_dataset(
 
 @router.get("/{dataset_id}/eda")
 async def get_eda(dataset_id: str, current_user=Depends(get_current_user)):
-    try:
-        oid = ObjectId(dataset_id)
-    except (InvalidId, Exception):
-        raise HTTPException(status_code=400, detail=f"Invalid dataset ID format: {dataset_id}")
-    db = get_db()
-    d = await db.datasets.find_one({"_id": oid, "user_id": str(current_user["_id"])})
-    if not d:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+    d = await fetch_user_dataset_or_raise(dataset_id, current_user)
     if d.get("status") not in ("ready", "indexed"):
         raise HTTPException(status_code=400, detail="Dataset not processed yet")
 
@@ -228,14 +248,7 @@ async def get_preview(
     rows: int = 20,
     current_user=Depends(get_current_user)
 ):
-    try:
-        oid = ObjectId(dataset_id)
-    except (InvalidId, Exception):
-        raise HTTPException(status_code=400, detail=f"Invalid dataset ID format: {dataset_id}")
-    db = get_db()
-    d = await db.datasets.find_one({"_id": oid, "user_id": str(current_user["_id"])})
-    if not d:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+    d = await fetch_user_dataset_or_raise(dataset_id, current_user)
 
     temp_path = None
     is_temp = False

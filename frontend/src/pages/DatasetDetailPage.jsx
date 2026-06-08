@@ -34,31 +34,60 @@ export default function DatasetDetailPage() {
   const [generatingSummary, setGeneratingSummary] = useState(false)
 
   const loadData = async () => {
+    console.log(`[DatasetDetailPage] loadData called for ID: ${id}`);
+    
+    // Client-side dataset ID validation: 24-character hexadecimal regex
+    const isObjectId = /^[0-9a-fA-F]{24}$/.test(id);
+    if (!isObjectId) {
+      console.warn(`[DatasetDetailPage] Client-side ID validation failed: "${id}" is not a valid 24-character hex ObjectId`);
+      setError(`Invalid dataset ID format ("${id}"). A dataset ID must be a 24-character hexadecimal string.`);
+      setLoading(false);
+      return;
+    }
+
     try {
       setLoading(true)
       setError(null)
       const dsRes = await datasetAPI.get(id)
+      console.log(`[DatasetDetailPage] Dataset details successfully loaded:`, dsRes.data);
       setDataset(dsRes.data)
 
       if (dsRes.data.status === 'ready') {
         const supportEDA = ['csv', 'xlsx', 'xls', 'txt', 'md', 'pdf', 'docx'].includes(dsRes.data.file_type)
         const supportPreview = ['csv', 'xlsx', 'xls', 'txt', 'md', 'pdf', 'docx', 'json'].includes(dsRes.data.file_type)
         
+        console.log(`[DatasetDetailPage] Fetching EDA and Preview for format: ${dsRes.data.file_type}`);
         try {
           const promises = []
           if (supportEDA) {
-            promises.push(datasetAPI.getEDA(id).then(res => setEda(res.data)).catch(err => console.error(err)))
+            promises.push(
+              datasetAPI.getEDA(id)
+                .then(res => {
+                  console.log(`[DatasetDetailPage] EDA loaded successfully`);
+                  setEda(res.data);
+                })
+                .catch(err => console.error(`[DatasetDetailPage] Failed to load EDA:`, err))
+            );
           }
           if (supportPreview) {
-            promises.push(datasetAPI.getPreview(id).then(res => setPreview(res.data)).catch(err => console.error(err)))
+            promises.push(
+              datasetAPI.getPreview(id)
+                .then(res => {
+                  console.log(`[DatasetDetailPage] Preview loaded successfully`);
+                  setPreview(res.data);
+                })
+                .catch(err => console.error(`[DatasetDetailPage] Failed to load Preview:`, err))
+            );
           }
           await Promise.all(promises)
         } catch (err) {
-          console.error('Failed to load EDA or Preview data', err)
+          console.error('[DatasetDetailPage] Failed to load EDA or Preview data concurrently:', err)
         }
       }
     } catch (err) {
-      setError(err.response?.data?.detail || 'Failed to load dataset details')
+      console.error(`[DatasetDetailPage] Failed to load dataset details:`, err);
+      const errMsg = err.response?.data?.detail || err.message || 'Failed to load dataset details';
+      setError(errMsg);
     } finally {
       setLoading(false)
     }

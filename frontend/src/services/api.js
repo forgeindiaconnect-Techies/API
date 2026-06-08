@@ -57,6 +57,7 @@ async function getOrRefreshAccessToken() {
 
 // Request interceptor
 api.interceptors.request.use(async (config) => {
+  console.log(`[API Request] ${config.method?.toUpperCase()} ${config.url}`, config.params || '');
   if (config.url.includes('/auth/refresh') || config.url.includes('/auth/login') || config.url.includes('/auth/register')) {
     return config
   }
@@ -68,8 +69,12 @@ api.interceptors.request.use(async (config) => {
       } else {
         config.headers['Authorization'] = `Bearer ${token}`
       }
+      console.log(`[API Request Auth] Token attached for: ${config.url}`);
+    } else {
+      console.warn(`[API Request Auth] No token available for: ${config.url}`);
     }
   } catch (e) {
+    console.error(`[API Request Auth Error] Failed to set auth header:`, e);
     return Promise.reject(e)
   }
   return config
@@ -77,9 +82,13 @@ api.interceptors.request.use(async (config) => {
 
 // Response interceptor
 api.interceptors.response.use(
-  (res) => res,
+  (res) => {
+    console.log(`[API Response Success] ${res.config.method?.toUpperCase()} ${res.config.url} Status: ${res.status}`);
+    return res;
+  },
   async (err) => {
     const original = err.config
+    console.error(`[API Response Error] ${original?.method?.toUpperCase()} ${original?.url} Status: ${err.response?.status}`, err.response?.data || err.message);
     if (
       err.response?.status === 401 &&
       !original._retry &&
