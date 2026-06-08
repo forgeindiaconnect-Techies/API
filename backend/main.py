@@ -1,4 +1,6 @@
 from fastapi import FastAPI, Request, HTTPException, Response
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
@@ -97,7 +99,7 @@ def _cors_headers(request: Request) -> dict:
     }
 
 @app.exception_handler(404)
-async def not_found(request: Request, exc: HTTPException):
+async def not_found(request: Request, exc: StarletteHTTPException):
     return JSONResponse(
         status_code=404,
         content={"detail": "Resource not found"},
@@ -105,9 +107,29 @@ async def not_found(request: Request, exc: HTTPException):
     )
 
 
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    logger.warning(f"StarletteHTTPException ({exc.status_code}): {exc.detail}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=_cors_headers(request),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.warning(f"RequestValidationError: {exc.errors()}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": "Validation error", "errors": exc.errors()},
+        headers=_cors_headers(request),
+    )
+
+
 @app.exception_handler(500)
 async def server_error(request: Request, exc: Exception):
-    logger.error(f"Internal server error: {exc}")
+    logger.error(f"Internal server error: {exc}", exc_info=True)
     return JSONResponse(
         status_code=500,
         content={"detail": "Internal server error"},

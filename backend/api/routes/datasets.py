@@ -52,11 +52,21 @@ def get_user_query(current_user: dict) -> dict:
 
 async def fetch_user_dataset_or_raise(dataset_id: str, current_user: dict) -> dict:
     logger.info(f"Fetching dataset details for ID: {dataset_id} | User: {current_user.get('_id')}")
+    
+    # Check if dataset_id is a valid 24-character hex string (standard MongoDB ObjectId format)
+    is_valid_hex = len(dataset_id) == 24 and all(c in "0123456789abcdefABCDEF" for c in dataset_id)
+    if not is_valid_hex:
+        logger.warning(f"ObjectId validation failed for ID: '{dataset_id}'")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid dataset ID format: '{dataset_id}'. MongoDB ObjectId must be exactly 24 hex characters."
+        )
+
     try:
         oid = ObjectId(dataset_id)
         id_query = {"$in": [oid, dataset_id]}
     except (InvalidId, Exception):
-        logger.warning(f"Invalid dataset ID format: {dataset_id}")
+        logger.warning(f"Invalid dataset ID format parsed: {dataset_id}")
         id_query = dataset_id
 
     db = get_db()
@@ -78,67 +88,85 @@ async def fetch_user_dataset_or_raise(dataset_id: str, current_user: dict) -> di
 async def list_datasets(current_user=Depends(get_current_user)):
     db = get_db()
     if db is None:
-        logger.error("Database connection wrapper is None")
+        logger.error("list_datasets: Database connection wrapper is None")
         raise HTTPException(status_code=500, detail="Database connection unavailable")
     
     datasets = []
-    user_query = get_user_query(current_user)
-    async for d in db.datasets.find({"user_id": user_query}):
-        datasets.append(fmt_dataset(d))
-    return sorted(datasets, key=lambda x: x["created_at"], reverse=True)
+    try:
+        user_query = get_user_query(current_user)
+        logger.info(f"list_datasets: querying datasets for user_query={user_query}")
+        async for d in db.datasets.find({"user_id": user_query}):
+            try:
+                datasets.append(fmt_dataset(d))
+            except Exception as fe:
+                logger.error(f"Error formatting dataset document {d.get('_id')}: {fe}", exc_info=True)
+                continue
+    except Exception as e:
+        logger.error(f"Failed to query datasets from MongoDB: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Database query failed: {str(e)}")
+
+    def sort_key(x):
+        val = x.get("created_at")
+        if isinstance(val, datetime):
+            return val
+        if isinstance(val, str):
+            try:
+                return datetime.fromisoformat(val.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+        return datetime.min
+
+    try:
+        return sorted(datasets, key=sort_key, reverse=True)
+    except Exception as se:
+        logger.error(f"Failed to sort datasets: {se}", exc_info=True)
+        return datasets
 
 
-@router.post("/upload")
+@router.post("/upload", status_code=202)
 async def upload_dataset(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     current_user=Depends(get_current_user),
 ):
     db = get_db()
-    ext = file.filename.split(".")[-1].lower()
+    if db is None:
+        logger.error("upload_dataset: Database connection wrapper is None")
+        raise HTTPException(status_code=500, detail="Database connection unavailable")
 
+    ext = file.filename.split(".")[-1].lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"File type .{ext} not supported")
 
+    # 1. Read file bytes and verify size quickly
     try:
         file_bytes = await file.read()
         file_size = len(file_bytes)
-        
-        if file_size > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="File too large")
-            
-        cloudinary_res = None
-        file_path = None
-
-        # Try to upload to Cloudinary if keys are fully configured
-        if settings.CLOUDINARY_CLOUD_NAME and settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET:
-            try:
-                from services.cloudinary_service import upload_file_to_cloudinary
-                cloudinary_res = await upload_file_to_cloudinary(file_bytes, file.filename)
-                logger.info("Successfully uploaded dataset to Cloudinary.")
-            except Exception as e:
-                logger.warning(f"Cloudinary upload failed: {e}. Falling back to local storage.")
-
-        # If Cloudinary is not configured or upload failed, save locally
-        if not cloudinary_res:
-            user_upload_dir = os.path.join(settings.UPLOAD_DIR, str(current_user["_id"]))
-            os.makedirs(user_upload_dir, exist_ok=True)
-            unique_id = str(uuid.uuid4())
-            file_path = os.path.join(user_upload_dir, f"{unique_id}.{ext}")
-            with open(file_path, "wb") as f:
-                f.write(file_bytes)
-            logger.info(f"Saved dataset locally to: {file_path}")
-            
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Dataset upload storage failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Dataset storage failed: {str(e)}")
+        logger.error(f"Failed to read upload file: {e}")
+        raise HTTPException(status_code=400, detail="Failed to read uploaded file")
 
+    if file_size > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large")
+
+    # 2. Write to local storage immediately to ensure background processing has a local file copy
+    try:
+        user_upload_dir = os.path.join(settings.UPLOAD_DIR, str(current_user["_id"]))
+        os.makedirs(user_upload_dir, exist_ok=True)
+        unique_id = str(uuid.uuid4())
+        local_path = os.path.join(user_upload_dir, f"{unique_id}.{ext}")
+        with open(local_path, "wb") as f:
+            f.write(file_bytes)
+        logger.info(f"Saved raw upload locally to: {local_path}")
+    except Exception as e:
+        logger.error(f"Failed to save temp file locally: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to store file: {str(e)}")
+
+    # 3. Create a pending dataset record in MongoDB
     doc = {
-        "cloudinary_url": cloudinary_res["url"] if cloudinary_res else None,
-        "public_id": cloudinary_res["public_id"] if cloudinary_res else None,
-        "file_path": file_path,
+        "cloudinary_url": None,
+        "public_id": None,
+        "file_path": local_path,
         "file_name": file.filename,
         "name": file.filename,
         "file_type": ext,
@@ -148,20 +176,63 @@ async def upload_dataset(
         "created_at": datetime.utcnow(),
     }
 
-    result = await db.datasets.insert_one(doc)
-    doc["_id"] = str(result.inserted_id)
-    doc["dataset_id"] = str(result.inserted_id)
-    
-    await db.datasets.update_one(
-        {"_id": result.inserted_id},
-        {"$set": {"dataset_id": str(result.inserted_id)}}
-    )
+    try:
+        result = await db.datasets.insert_one(doc)
+        doc["_id"] = str(result.inserted_id)
+        doc["dataset_id"] = str(result.inserted_id)
+        
+        await db.datasets.update_one(
+            {"_id": result.inserted_id},
+            {"$set": {"dataset_id": str(result.inserted_id)}}
+        )
+    except Exception as e:
+        logger.error(f"Failed to insert pending dataset document: {e}")
+        if os.path.exists(local_path):
+            os.remove(local_path)
+        raise HTTPException(status_code=500, detail="Database insertion failed")
 
-    from services.dataset_service import build_index_for_dataset
+    # 4. Define background task for Cloudinary upload & RAG indexing
+    async def process_upload_and_index_bg(dataset_doc: dict, file_content: bytes, filename: str, path: str):
+        try:
+            cloudinary_res = None
+            if settings.CLOUDINARY_CLOUD_NAME and settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET:
+                try:
+                    logger.info(f"Background: Uploading {filename} to Cloudinary...")
+                    from services.cloudinary_service import upload_file_to_cloudinary
+                    cloudinary_res = await upload_file_to_cloudinary(file_content, filename)
+                    logger.info("Background: Successfully uploaded dataset to Cloudinary.")
+                except Exception as upload_err:
+                    logger.warning(f"Background: Cloudinary upload failed: {upload_err}. Staying with local path.")
+
+            db_instance = get_db()
+            if cloudinary_res:
+                dataset_doc["cloudinary_url"] = cloudinary_res["url"]
+                dataset_doc["public_id"] = cloudinary_res["public_id"]
+                await db_instance.datasets.update_one(
+                    {"_id": ObjectId(dataset_doc["_id"])},
+                    {"$set": {
+                        "cloudinary_url": cloudinary_res["url"],
+                        "public_id": cloudinary_res["public_id"]
+                    }}
+                )
+            
+            # Index the dataset
+            from services.dataset_service import build_index_for_dataset
+            await build_index_for_dataset(dataset_doc, db_instance)
+        except Exception as bg_err:
+            logger.error(f"Background upload processing failed for dataset {dataset_doc.get('_id')}: {bg_err}")
+            db_instance = get_db()
+            await db_instance.datasets.update_one(
+                {"_id": ObjectId(dataset_doc["_id"])},
+                {"$set": {"status": "error", "error_message": f"Background processing failed: {str(bg_err)}"}}
+            )
+
     background_tasks.add_task(
-        build_index_for_dataset,
+        process_upload_and_index_bg,
         doc,
-        db
+        file_bytes,
+        file.filename,
+        local_path
     )
 
     return fmt_dataset(doc)
