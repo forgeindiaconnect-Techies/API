@@ -133,7 +133,19 @@ class RAGPipeline:
         if not text.strip():
             return []
 
-        # Try LangChain splitter first
+        # Try langchain-text-splitters (standalone lightweight package)
+        try:
+            from langchain_text_splitters import RecursiveCharacterTextSplitter
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=self.chunk_size,
+                chunk_overlap=self.chunk_overlap,
+                separators=["\n\n", "\n", ". ", " ", ""],
+            )
+            return splitter.split_text(text)
+        except ImportError:
+            pass
+
+        # Fallback: try legacy langchain import
         try:
             from langchain.text_splitter import RecursiveCharacterTextSplitter
             splitter = RecursiveCharacterTextSplitter(
