@@ -336,6 +336,12 @@ def get_embedding_model(model_name: str = "all-MiniLM-L6-v2"):
     # 2. Try SentenceTransformer
     try:
         logger.info(f"Initializing SentenceTransformer model: {model_name}...")
+        try:
+            import torch
+            torch.set_num_threads(1)
+            logger.info("Set PyTorch num_threads to 1 for CPU optimization.")
+        except Exception as torch_err:
+            logger.warning(f"Failed to set PyTorch num_threads: {torch_err}")
         from sentence_transformers import SentenceTransformer
         return SentenceTransformer(model_name)
     except Exception as e:
