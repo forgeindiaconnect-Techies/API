@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 from jose import JWTError, jwt
 import bcrypt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from config import settings
 from database import get_db
@@ -25,7 +25,7 @@ def verify_password(plain: str, hashed: str) -> bool:
     except Exception as e:
         logger.error(f"Password verification failed: {e}")
         return False
-
+ 
 
 def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
@@ -68,24 +68,15 @@ def decode_token(token: str) -> Dict[str, Any]:
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    request: Request,
 ):
-    token = credentials.credentials
-    payload = decode_token(token)
-
-    if payload.get("type") != "access":
-        raise HTTPException(status_code=401, detail="Invalid token type")
-
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    db = get_db()
-    user = await db.users.find_one({"_id": user_id})
-
+    user = getattr(request.state, "user", None)
     if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     return user
 
 

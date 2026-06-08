@@ -8,6 +8,7 @@ import time
 
 from config import settings
 from database import connect_db, disconnect_db
+from middleware import AuthMiddleware, RequestLoggingMiddleware
 from api.routes.auth import router as auth_router
 from api.routes.chat import router as chat_router
 from api.routes.datasets import router as datasets_router
@@ -49,62 +50,18 @@ app = FastAPI(
 )
 
 # ─── Middleware ────────────────────────────────────────────────────────────────
+# Middleware added last executes first. Outer-most middleware runs first.
 
+# 1. GZip compression (inner-most)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
+# 2. Authentication (attaches validated user to request.state.user)
+app.add_middleware(AuthMiddleware)
 
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    # Suppress logging for HEAD health checks to keep production logs clean
-    if request.method == "HEAD" and request.url.path in ("/", "/api/health"):
-        return await call_next(request)
+# 3. Request Logging & Manual CORS response injection on exceptions/streams
+app.add_middleware(RequestLoggingMiddleware)
 
-    origin = request.headers.get("origin")
-    auth_header = request.headers.get("authorization")
-    masked_auth = f"{auth_header[:25]}..." if auth_header and len(auth_header) > 25 else ("Bearer Present" if auth_header else "None")
-    logger.info(f"Incoming Request: {request.method} {request.url.path} | Origin: {origin} | Auth: {masked_auth}")
-
-    start = time.time()
-    try:
-        response = await call_next(request)
-        duration = round((time.time() - start) * 1000, 2)
-
-        # Set manual CORS headers on all responses so it's always set (even on errors, preflights, and streaming)
-        allowed_origins = [
-            "https://d-ai-nu.vercel.app",
-            "http://localhost:3000",
-            "http://localhost:5173"
-        ]
-        if origin:
-            if origin in allowed_origins or (origin.startswith("https://") and origin.endswith(".vercel.app")):
-                response.headers["Access-Control-Allow-Origin"] = origin
-            else:
-                response.headers["Access-Control-Allow-Origin"] = "https://d-ai-nu.vercel.app"
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, HEAD"
-            response.headers["Access-Control-Allow-Headers"] = "*"
-        elif not response.headers.get("access-control-allow-origin"):
-            response.headers["Access-Control-Allow-Origin"] = "https://d-ai-nu.vercel.app"
-
-        # Filter out 404 noise from crawlers/bots
-        if response.status_code == 404:
-            if request.url.path.startswith(PREFIX) or request.url.path == "/":
-                logger.warning(f"404 Not Found: {request.method} {request.url.path}")
-        else:
-            logger.info(
-                f"{request.method} {request.url.path} → {response.status_code} ({duration}ms) | "
-                f"CORS Allow-Origin: {response.headers.get('access-control-allow-origin')}"
-            )
-
-        response.headers["X-Process-Time"] = str(duration)
-        return response
-    except Exception as e:
-        logger.error(f"Request failed: {request.method} {request.url.path} | Error: {e}")
-        raise
-
-
-# Add CORSMiddleware last so that it is the outermost middleware in the ASGI stack.
-# This prevents headers from being stripped from StreamingResponse or during exceptions.
+# 4. CORSMiddleware (outer-most, handles preflight OPTIONS requests directly)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
