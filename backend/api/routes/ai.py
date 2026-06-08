@@ -191,6 +191,8 @@ async def generate_image(data: GenerateImageRequest, current_user=Depends(get_cu
         }
 
 
+_embedding_models_cache = {}
+
 @router.post("/embed")
 async def create_embeddings(
     texts: list[str],
@@ -198,8 +200,10 @@ async def create_embeddings(
     current_user=Depends(get_current_user),
 ):
     try:
-        from sentence_transformers import SentenceTransformer
-        st_model = SentenceTransformer(model)
+        if model not in _embedding_models_cache:
+            from sentence_transformers import SentenceTransformer
+            _embedding_models_cache[model] = SentenceTransformer(model)
+        st_model = _embedding_models_cache[model]
         embeddings = st_model.encode(texts)
         return {
             "embeddings": embeddings.tolist(),

@@ -85,7 +85,7 @@ class VectorStore:
         self._docs_path = os.path.join(self._faiss_dir, f"{self.collection_name}.json")
 
         try:
-            import faiss
+            import faiss  # type: ignore
             import json
             import numpy as np
             self._dimension = 384
@@ -145,7 +145,7 @@ class VectorStore:
             await run_with_retry_async(op)
         elif self.backend == "faiss" and self._index is not None:
             import numpy as np
-            import faiss
+            import faiss  # type: ignore
             import json
             if embeddings and len(embeddings[0]) != self._dimension:
                 self._dimension = len(embeddings[0])
@@ -177,13 +177,14 @@ class VectorStore:
                 )
             results = await run_with_retry_async(op)
             out = []
-            for i in range(len(results["ids"][0])):
-                out.append({
-                    "id": results["ids"][0][i],
-                    "document": results["documents"][0][i],
-                    "metadata": results["metadatas"][0][i],
-                    "score": 1 - results["distances"][0][i],  # cosine → similarity
-                })
+            if results and results.get("ids") and len(results["ids"]) > 0:
+                for i in range(len(results["ids"][0])):
+                    out.append({
+                        "id": results["ids"][0][i],
+                        "document": results["documents"][0][i] if results.get("documents") else "",
+                        "metadata": results["metadatas"][0][i] if results.get("metadatas") else {},
+                        "score": 1 - results["distances"][0][i] if results.get("distances") else 0.0,
+                    })
             return out
 
         elif self.backend == "faiss" and self._index is not None:
@@ -212,7 +213,8 @@ class VectorStore:
     async def count(self) -> int:
         if self.backend == "chroma" and self._collection:
             from services.chroma_service import run_with_retry_async
-            return await run_with_retry_async(self._collection.count)
+            count_val = await run_with_retry_async(self._collection.count)
+            return count_val or 0
         elif self.backend == "faiss" and self._index:
             return self._index.ntotal
         return 0
@@ -323,8 +325,12 @@ class HashingTFIDFEmbedder:
         return np.array(embeddings, dtype="float32")
 
 
+_shared_embedding_model = None
+
 def get_embedding_model(model_name: str = "all-MiniLM-L6-v2"):
     """Load embedding model with fallbacks to OpenAI and HashingTFIDFEmbedder to ensure zero crashes"""
+    global _shared_embedding_model
+
     # 1. Try OpenAI if API key is present
     if settings.OPENAI_API_KEY and not settings.OPENAI_API_KEY.startswith("sk-..."):
         try:
@@ -335,15 +341,17 @@ def get_embedding_model(model_name: str = "all-MiniLM-L6-v2"):
 
     # 2. Try SentenceTransformer
     try:
-        logger.info(f"Initializing SentenceTransformer model: {model_name}...")
-        try:
-            import torch
-            torch.set_num_threads(1)
-            logger.info("Set PyTorch num_threads to 1 for CPU optimization.")
-        except Exception as torch_err:
-            logger.warning(f"Failed to set PyTorch num_threads: {torch_err}")
-        from sentence_transformers import SentenceTransformer
-        return SentenceTransformer(model_name)
+        if _shared_embedding_model is None:
+            logger.info(f"Initializing SentenceTransformer model: {model_name}...")
+            try:
+                import torch
+                torch.set_num_threads(1)
+                logger.info("Set PyTorch num_threads to 1 for CPU optimization.")
+            except Exception as torch_err:
+                logger.warning(f"Failed to set PyTorch num_threads: {torch_err}")
+            from sentence_transformers import SentenceTransformer
+            _shared_embedding_model = SentenceTransformer(model_name)
+        return _shared_embedding_model
     except Exception as e:
         logger.error(f"Failed to initialize SentenceTransformer ({e}). Falling back to HashingTFIDFEmbedder.")
         return HashingTFIDFEmbedder(384)

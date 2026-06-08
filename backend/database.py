@@ -3,13 +3,13 @@ from pymongo import ASCENDING, DESCENDING
 from config import settings
 from bson import ObjectId
 from bson.errors import InvalidId
-from typing import Any
+from typing import Any, Optional
 import logging
 
 logger = logging.getLogger(__name__)
 
-client: AsyncIOMotorClient = None
-db = None
+client: Optional[AsyncIOMotorClient] = None
+db: Any = None
 
 
 def convert_id(val: Any) -> Any:
@@ -222,7 +222,7 @@ class MockCursor:
         data = self._data[self._skip_val:]
         if self._limit_val:
             data = data[:self._limit_val]
-        return iter(data).__aiter__() if hasattr(iter(data), '__aiter__') else _AsyncIter(data)
+        return _AsyncIter(data)
 
 
 class _AsyncIter:

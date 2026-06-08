@@ -1,6 +1,10 @@
 from fastapi import APIRouter, HTTPException, Depends, status
-from datetime import datetime
-from models import UserCreate, UserLogin, TokenResponse, UserResponse, ProfileUpdate, PasswordChange, RefreshTokenRequest
+from datetime import datetime, timedelta
+from models import (
+    UserCreate, UserLogin, TokenResponse, UserResponse, 
+    ProfileUpdate, PasswordChange, RefreshTokenRequest,
+    ApiKeyCreate, ApiKeyResponse
+)
 from auth.utils import (
     hash_password, verify_password,
     create_access_token, create_refresh_token,
@@ -8,6 +12,8 @@ from auth.utils import (
 )
 from database import get_db
 import logging
+import secrets
+import hashlib
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 logger = logging.getLogger(__name__)
@@ -59,17 +65,38 @@ async def register(data: UserCreate):
 @router.post("/login", response_model=TokenResponse)
 async def login(data: UserLogin):
     db = get_db()
-    user = await db.users.find_one({"email": data.email})
+    email = data.email.lower().strip()
+    logger.info(f"Attempting login for email: '{email}'")
+    
+    user = await db.users.find_one({"email": email})
+    if not user:
+        logger.warning(f"Login failed: User with email '{email}' not found in database.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+        )
 
-    if not user or not verify_password(data.password, user.get("password_hash", "")):
+    password_hash = user.get("password_hash", "")
+    if not password_hash:
+        logger.warning(f"Login failed: User '{email}' has no password hash stored.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+        )
+
+    is_valid = verify_password(data.password, password_hash)
+    if not is_valid:
+        logger.warning(f"Login failed: Password verification failed for user '{email}'.")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
 
     if user.get("disabled"):
+        logger.warning(f"Login failed: User '{email}' is disabled.")
         raise HTTPException(status_code=400, detail="Account disabled")
 
+    logger.info(f"Login successful for user '{email}'. Updating last login time.")
     # Update last login
     await db.users.update_one(
         {"_id": user["_id"]},
@@ -133,3 +160,35 @@ async def change_password(data: PasswordChange, current_user=Depends(get_current
         {"$set": {"password_hash": hash_password(data.new_password)}}
     )
     return {"message": "Password updated successfully"}
+
+
+@router.post("/apikey", response_model=ApiKeyResponse, status_code=status.HTTP_201_CREATED)
+async def generate_api_key(data: ApiKeyCreate, current_user=Depends(get_current_user)):
+    db = get_db()
+    raw_key = secrets.token_urlsafe(32)
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    
+    key_doc = {
+        "name": data.name,
+        "key_hash": key_hash,
+        "key_prefix": raw_key[:4] + "..." + raw_key[-4:],
+        "scopes": data.scopes,
+        "rate_limit": data.rate_limit,
+        "requests_count": 0,
+        "status": "active",
+        "user_id": str(current_user["_id"]),
+        "created_at": datetime.utcnow(),
+    }
+    
+    if data.expires_in_days:
+        key_doc["expires_at"] = datetime.utcnow() + timedelta(days=data.expires_in_days)
+        
+    result = await db.api_keys.insert_one(key_doc)
+    
+    # We must return an ApiKeyResponse model. We set the unhashed key only for this one-time display.
+    response_data = key_doc.copy()
+    response_data["id"] = str(result.inserted_id)
+    response_data["key"] = raw_key
+    
+    return ApiKeyResponse(**response_data)
+

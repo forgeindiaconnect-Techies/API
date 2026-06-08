@@ -20,8 +20,14 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(plain: str, hashed: str) -> bool:
+    if not hashed:
+        logger.warning("verify_password called with empty hash")
+        return False
     try:
         return bcrypt.checkpw(plain.encode('utf-8'), hashed.encode('utf-8'))
+    except ValueError as e:
+        logger.warning(f"Invalid bcrypt hash format: {e}")
+        return False
     except Exception as e:
         logger.error(f"Password verification failed: {e}")
         return False
