@@ -342,15 +342,21 @@ def get_embedding_model(model_name: str = "all-MiniLM-L6-v2"):
     # 2. Try SentenceTransformer
     try:
         if _shared_embedding_model is None:
-            logger.info(f"Initializing SentenceTransformer model: {model_name}...")
+            logger.info(f"Initializing SentenceTransformer model: {model_name} on CPU...")
             try:
                 import torch
                 torch.set_num_threads(1)
                 logger.info("Set PyTorch num_threads to 1 for CPU optimization.")
             except Exception as torch_err:
                 logger.warning(f"Failed to set PyTorch num_threads: {torch_err}")
+                
+            # Double force ONNX Runtime to CPU and suppress card0 discovery warnings
+            import os
+            os.environ["ORT_LOGGING_LEVEL"] = "3"
+            os.environ["ONNXRUNTIME_PROVIDERS"] = '["CPUExecutionProvider"]'
+            
             from sentence_transformers import SentenceTransformer
-            _shared_embedding_model = SentenceTransformer(model_name)
+            _shared_embedding_model = SentenceTransformer(model_name, device="cpu")
         return _shared_embedding_model
     except Exception as e:
         logger.error(f"Failed to initialize SentenceTransformer ({e}). Falling back to HashingTFIDFEmbedder.")

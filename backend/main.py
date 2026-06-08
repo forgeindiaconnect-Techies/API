@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import logging
 import time
+import asyncio
 
 from config import settings
 from database import connect_db, disconnect_db
@@ -27,17 +28,44 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def initialize_app_bg():
+    logger.info("Starting background application initialization...")
+    try:
+        # 1. Connect to MongoDB
+        await connect_db()
+        
+        # 2. Trigger eager load of the embedding model to cache it in memory
+        logger.info("Eager loading embedding model in background...")
+        try:
+            from vector_db.store import get_embedding_model
+            await asyncio.to_thread(get_embedding_model)
+            logger.info("Embedding model pre-loaded successfully.")
+        except Exception as embed_err:
+            logger.error(f"Eager loading embedding model failed: {embed_err}")
+
+        # 3. RAG index startup recovery check
+        try:
+            from services.startup_rebuild import run_startup_recovery
+            await run_startup_recovery()
+            logger.info("Background startup recovery checks completed.")
+        except Exception as recovery_err:
+            logger.error(f"Startup recovery failed: {recovery_err}")
+
+    except Exception as e:
+        logger.error(f"Critical error during background application initialization: {e}", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting Personal AI Studio API...")
-    await connect_db()
+    logger.info("Starting Personal AI Studio API (Immediate Port Binding Mode)...")
+    # Start the initialization asynchronously in the background so Uvicorn binds immediately
+    init_task = asyncio.create_task(initialize_app_bg())
     
-    # RAG index startup recovery check
-    from services.startup_rebuild import run_startup_recovery
-    await run_startup_recovery()
-
     yield
+    
     logger.info("Shutting down...")
+    if not init_task.done():
+        init_task.cancel()
     await disconnect_db()
 
 
