@@ -1,11 +1,12 @@
 import axios from 'axios'
 import { useAuthStore } from '../store'
 
-const BASE_URL = import.meta.env.VITE_API_URL || '/api/v1'
+const BASE_URL = import.meta.env.VITE_API_URL || 'https://d-ai-7k8h.onrender.com/api/v1'
 
 const api = axios.create({
   baseURL: BASE_URL,
   timeout: 60000,
+  withCredentials: true,
 })
 
 function getjwtExpiry(token) {

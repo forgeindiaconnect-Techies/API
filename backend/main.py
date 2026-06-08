@@ -79,15 +79,40 @@ app.add_middleware(
 
 # ─── Exception Handlers ───────────────────────────────────────────────────────
 
+ALLOWED_ORIGINS = [
+    "https://d-ai-nu.vercel.app",
+    "http://localhost:3000",
+    "http://localhost:5173",
+]
+
+def _cors_headers(request: Request) -> dict:
+    origin = request.headers.get("origin", "")
+    if origin in ALLOWED_ORIGINS or (origin.startswith("https://") and origin.endswith(".vercel.app")):
+        resolved = origin
+    else:
+        resolved = "https://d-ai-nu.vercel.app"
+    return {
+        "Access-Control-Allow-Origin": resolved,
+        "Access-Control-Allow-Credentials": "true",
+    }
+
 @app.exception_handler(404)
 async def not_found(request: Request, exc: HTTPException):
-    return JSONResponse(status_code=404, content={"detail": "Resource not found"})
+    return JSONResponse(
+        status_code=404,
+        content={"detail": "Resource not found"},
+        headers=_cors_headers(request),
+    )
 
 
 @app.exception_handler(500)
 async def server_error(request: Request, exc: Exception):
     logger.error(f"Internal server error: {exc}")
-    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+        headers=_cors_headers(request),
+    )
 
 
 # ─── Routers ──────────────────────────────────────────────────────────────────

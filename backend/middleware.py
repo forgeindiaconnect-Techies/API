@@ -60,8 +60,29 @@ class AuthMiddleware:
     Bypasses preflight OPTIONS and public endpoints.
     Avoids BaseHTTPMiddleware to prevent stream-blocking issues in SSE endpoints.
     """
+    ALLOWED_ORIGINS = [
+        "https://d-ai-nu.vercel.app",
+        "http://localhost:3000",
+        "http://localhost:5173",
+    ]
+
     def __init__(self, app):
         self.app = app
+
+    def _cors_response(self, origin: str | None, status_code: int, content: dict, headers: dict | None = None) -> JSONResponse:
+        """Build a JSONResponse with CORS headers so the browser doesn't block error responses."""
+        cors_headers = dict(headers or {})
+        resolved_origin = None
+        if origin:
+            if origin in self.ALLOWED_ORIGINS or (origin.startswith("https://") and origin.endswith(".vercel.app")):
+                resolved_origin = origin
+        if not resolved_origin:
+            resolved_origin = "https://d-ai-nu.vercel.app"
+        cors_headers["Access-Control-Allow-Origin"] = resolved_origin
+        cors_headers["Access-Control-Allow-Credentials"] = "true"
+        cors_headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, HEAD"
+        cors_headers["Access-Control-Allow-Headers"] = "*"
+        return JSONResponse(status_code=status_code, content=content, headers=cors_headers)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -69,7 +90,8 @@ class AuthMiddleware:
             return
 
         request = Request(scope, receive=receive)
-        
+        origin = request.headers.get("origin")
+
         # 1. Bypass OPTIONS preflight requests completely
         if request.method == "OPTIONS":
             await self.app(scope, receive, send)
@@ -98,10 +120,10 @@ class AuthMiddleware:
         # 3. Extract and validate Bearer Token
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
-            response = JSONResponse(
-                status_code=401,
-                content={"detail": "Not authenticated"},
-                headers={"WWW-Authenticate": "Bearer"}
+            response = self._cors_response(
+                origin, 401,
+                {"detail": "Not authenticated"},
+                {"WWW-Authenticate": "Bearer"},
             )
             await response(scope, receive, send)
             return
@@ -111,36 +133,24 @@ class AuthMiddleware:
             payload = decode_token(token, expected_type="access")
             user_id = payload.get("sub")
             if not user_id:
-                response = JSONResponse(
-                    status_code=401,
-                    content={"detail": "Invalid token payload"}
-                )
+                response = self._cors_response(origin, 401, {"detail": "Invalid token payload"})
                 await response(scope, receive, send)
                 return
 
             db = get_db()
             if db is None:
-                response = JSONResponse(
-                    status_code=500,
-                    content={"detail": "Database connection unavailable"}
-                )
+                response = self._cors_response(origin, 500, {"detail": "Database connection unavailable"})
                 await response(scope, receive, send)
                 return
 
             user = await db.users.find_one({"_id": user_id})
             if not user:
-                response = JSONResponse(
-                    status_code=401,
-                    content={"detail": "User not found"}
-                )
+                response = self._cors_response(origin, 401, {"detail": "User not found"})
                 await response(scope, receive, send)
                 return
 
             if user.get("disabled"):
-                response = JSONResponse(
-                    status_code=400,
-                    content={"detail": "Account disabled"}
-                )
+                response = self._cors_response(origin, 400, {"detail": "Account disabled"})
                 await response(scope, receive, send)
                 return
 
@@ -149,19 +159,19 @@ class AuthMiddleware:
             scope["state"]["user"] = user
 
         except HTTPException as he:
-            response = JSONResponse(
-                status_code=he.status_code,
-                content={"detail": he.detail},
-                headers=he.headers
+            response = self._cors_response(
+                origin, he.status_code,
+                {"detail": he.detail},
+                dict(he.headers) if he.headers else None,
             )
             await response(scope, receive, send)
             return
         except Exception as e:
             logger.error(f"AuthMiddleware error: {e}")
-            response = JSONResponse(
-                status_code=401,
-                content={"detail": f"Authentication failed: {str(e)}"},
-                headers={"WWW-Authenticate": "Bearer"}
+            response = self._cors_response(
+                origin, 401,
+                {"detail": f"Authentication failed: {str(e)}"},
+                {"WWW-Authenticate": "Bearer"},
             )
             await response(scope, receive, send)
             return

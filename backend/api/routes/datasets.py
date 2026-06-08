@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
 from datetime import datetime
 from typing import List, Optional
+from bson import ObjectId
+from bson.errors import InvalidId
 import os, shutil, uuid, logging
 
 from models import DatasetResponse, ProcessingOptions, EDAResponse
@@ -128,8 +130,12 @@ async def upload_dataset(
 
 @router.get("/{dataset_id}")
 async def get_dataset(dataset_id: str, current_user=Depends(get_current_user)):
+    try:
+        oid = ObjectId(dataset_id)
+    except (InvalidId, Exception):
+        raise HTTPException(status_code=400, detail=f"Invalid dataset ID format: {dataset_id}")
     db = get_db()
-    d = await db.datasets.find_one({"_id": dataset_id, "user_id": str(current_user["_id"])})
+    d = await db.datasets.find_one({"_id": oid, "user_id": str(current_user["_id"])})
     if not d:
         raise HTTPException(status_code=404, detail="Dataset not found")
     return fmt_dataset(d)
@@ -137,8 +143,12 @@ async def get_dataset(dataset_id: str, current_user=Depends(get_current_user)):
 
 @router.delete("/{dataset_id}")
 async def delete_dataset(dataset_id: str, current_user=Depends(get_current_user)):
+    try:
+        oid = ObjectId(dataset_id)
+    except (InvalidId, Exception):
+        raise HTTPException(status_code=400, detail=f"Invalid dataset ID format: {dataset_id}")
     db = get_db()
-    d = await db.datasets.find_one({"_id": dataset_id, "user_id": str(current_user["_id"])})
+    d = await db.datasets.find_one({"_id": oid, "user_id": str(current_user["_id"])})
     if not d:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
@@ -154,7 +164,7 @@ async def delete_dataset(dataset_id: str, current_user=Depends(get_current_user)
         except Exception as e:
             logger.error(f"Failed to delete Cloudinary file {public_id}: {e}")
 
-    await db.datasets.delete_one({"_id": dataset_id})
+    await db.datasets.delete_one({"_id": oid})
     return {"message": "Dataset deleted"}
 
 
@@ -165,12 +175,16 @@ async def reprocess_dataset(
     background_tasks: BackgroundTasks,
     current_user=Depends(get_current_user),
 ):
+    try:
+        oid = ObjectId(dataset_id)
+    except (InvalidId, Exception):
+        raise HTTPException(status_code=400, detail=f"Invalid dataset ID format: {dataset_id}")
     db = get_db()
-    d = await db.datasets.find_one({"_id": dataset_id, "user_id": str(current_user["_id"])})
+    d = await db.datasets.find_one({"_id": oid, "user_id": str(current_user["_id"])})
     if not d:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    await db.datasets.update_one({"_id": dataset_id}, {"$set": {"status": "processing"}})
+    await db.datasets.update_one({"_id": oid}, {"$set": {"status": "processing"}})
     from services.dataset_service import build_index_for_dataset
     background_tasks.add_task(
         build_index_for_dataset, d, db
@@ -180,8 +194,12 @@ async def reprocess_dataset(
 
 @router.get("/{dataset_id}/eda")
 async def get_eda(dataset_id: str, current_user=Depends(get_current_user)):
+    try:
+        oid = ObjectId(dataset_id)
+    except (InvalidId, Exception):
+        raise HTTPException(status_code=400, detail=f"Invalid dataset ID format: {dataset_id}")
     db = get_db()
-    d = await db.datasets.find_one({"_id": dataset_id, "user_id": str(current_user["_id"])})
+    d = await db.datasets.find_one({"_id": oid, "user_id": str(current_user["_id"])})
     if not d:
         raise HTTPException(status_code=404, detail="Dataset not found")
     if d.get("status") not in ("ready", "indexed"):
@@ -210,8 +228,12 @@ async def get_preview(
     rows: int = 20,
     current_user=Depends(get_current_user)
 ):
+    try:
+        oid = ObjectId(dataset_id)
+    except (InvalidId, Exception):
+        raise HTTPException(status_code=400, detail=f"Invalid dataset ID format: {dataset_id}")
     db = get_db()
-    d = await db.datasets.find_one({"_id": dataset_id, "user_id": str(current_user["_id"])})
+    d = await db.datasets.find_one({"_id": oid, "user_id": str(current_user["_id"])})
     if not d:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
