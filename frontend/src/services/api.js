@@ -79,7 +79,13 @@ api.interceptors.response.use(
   (res) => res,
   async (err) => {
     const original = err.config
-    if (err.response?.status === 401 && !original._retry && !original.url.includes('/auth/refresh')) {
+    if (
+      err.response?.status === 401 &&
+      !original._retry &&
+      !original.url.includes('/auth/refresh') &&
+      !original.url.includes('/auth/login') &&
+      !original.url.includes('/auth/register')
+    ) {
       original._retry = true
       const refreshToken = localStorage.getItem("refresh_token") || useAuthStore.getState().refreshToken
       const { setAuth, logout } = useAuthStore.getState()

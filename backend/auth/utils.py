@@ -1,6 +1,6 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
-from jose import JWTError, jwt
+from jose import JWTError, jwt, ExpiredSignatureError
 import bcrypt
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -35,7 +35,7 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
-    expire = datetime.utcnow() + (
+    expire = datetime.now(timezone.utc) + (
         expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     to_encode["exp"] = expire
@@ -45,7 +45,7 @@ def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta]
 
 def create_refresh_token(data: Dict[str, Any]) -> str:
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    expire = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     to_encode["exp"] = expire
     to_encode["type"] = "refresh"
     secret = settings.JWT_REFRESH_SECRET or settings.SECRET_KEY
@@ -65,7 +65,7 @@ def decode_token(token: str, expected_type: str = "access") -> Dict[str, Any]:
                 headers={"WWW-Authenticate": "Bearer"},
             )
         return payload
-    except jwt.ExpiredSignatureError as e:
+    except ExpiredSignatureError as e:
         logger.warning(f"JWT {expected_type} token expired: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -119,6 +119,6 @@ async def verify_api_key(api_key: str) -> Optional[Dict]:
     # Update last_used
     await db.api_keys.update_one(
         {"_id": key_doc["_id"]},
-        {"$set": {"last_used_at": datetime.utcnow()}, "$inc": {"requests_count": 1}}
+        {"$set": {"last_used_at": datetime.now(timezone.utc)}, "$inc": {"requests_count": 1}}
     )
     return key_doc

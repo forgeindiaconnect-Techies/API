@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends, status
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from models import (
     UserCreate, UserLogin, TokenResponse, UserResponse, 
     ProfileUpdate, PasswordChange, RefreshTokenRequest,
@@ -25,7 +25,7 @@ def format_user(user: dict) -> UserResponse:
         name=user["name"],
         email=user["email"],
         role=user.get("role", "user"),
-        created_at=user.get("created_at", datetime.utcnow()),
+        created_at=user.get("created_at", datetime.now(timezone.utc)),
         avatar_url=user.get("avatar_url"),
     )
 
@@ -44,7 +44,7 @@ async def register(data: UserCreate):
         "email": data.email,
         "password_hash": hash_password(data.password),
         "role": "admin",  # First user is admin
-        "created_at": datetime.utcnow(),
+        "created_at": datetime.now(timezone.utc),
         "disabled": False,
     }
 
@@ -100,7 +100,7 @@ async def login(data: UserLogin):
     # Update last login
     await db.users.update_one(
         {"_id": user["_id"]},
-        {"$set": {"last_login": datetime.utcnow()}}
+        {"$set": {"last_login": datetime.now(timezone.utc)}}
     )
 
     token_data = {"sub": str(user["_id"]), "email": user["email"]}
@@ -143,7 +143,7 @@ async def get_me(current_user=Depends(get_current_user)):
 @router.put("/profile", response_model=UserResponse)
 async def update_profile(data: ProfileUpdate, current_user=Depends(get_current_user)):
     db = get_db()
-    updates = {k: v for k, v in data.dict().items() if v is not None}
+    updates = {k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None}
     if updates:
         await db.users.update_one({"_id": current_user["_id"]}, {"$set": updates})
     updated = await db.users.find_one({"_id": current_user["_id"]})
@@ -177,18 +177,26 @@ async def generate_api_key(data: ApiKeyCreate, current_user=Depends(get_current_
         "requests_count": 0,
         "status": "active",
         "user_id": str(current_user["_id"]),
-        "created_at": datetime.utcnow(),
+        "created_at": datetime.now(timezone.utc),
     }
     
     if data.expires_in_days:
-        key_doc["expires_at"] = datetime.utcnow() + timedelta(days=data.expires_in_days)
+        key_doc["expires_at"] = datetime.now(timezone.utc) + timedelta(days=data.expires_in_days)
         
     result = await db.api_keys.insert_one(key_doc)
     
     # We must return an ApiKeyResponse model. We set the unhashed key only for this one-time display.
-    response_data = key_doc.copy()
-    response_data["id"] = str(result.inserted_id)
-    response_data["key"] = raw_key
-    
-    return ApiKeyResponse(**response_data)
+    return ApiKeyResponse(
+        id=str(result.inserted_id),
+        name=key_doc["name"],
+        key=raw_key,
+        key_prefix=key_doc["key_prefix"],
+        scopes=key_doc["scopes"],
+        rate_limit=key_doc["rate_limit"],
+        requests_count=key_doc["requests_count"],
+        status=key_doc["status"],
+        user_id=key_doc["user_id"],
+        created_at=key_doc["created_at"],
+        expires_at=key_doc.get("expires_at"),
+    )
 
