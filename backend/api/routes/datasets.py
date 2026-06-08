@@ -66,17 +66,38 @@ async def upload_dataset(
         if file_size > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
             raise HTTPException(status_code=413, detail="File too large")
             
-        from services.cloudinary_service import upload_file_to_cloudinary
-        cloudinary_res = await upload_file_to_cloudinary(file_bytes, file.filename)
-        
+        cloudinary_res = None
+        file_path = None
+
+        # Try to upload to Cloudinary if keys are fully configured
+        if settings.CLOUDINARY_CLOUD_NAME and settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET:
+            try:
+                from services.cloudinary_service import upload_file_to_cloudinary
+                cloudinary_res = await upload_file_to_cloudinary(file_bytes, file.filename)
+                logger.info("Successfully uploaded dataset to Cloudinary.")
+            except Exception as e:
+                logger.warning(f"Cloudinary upload failed: {e}. Falling back to local storage.")
+
+        # If Cloudinary is not configured or upload failed, save locally
+        if not cloudinary_res:
+            user_upload_dir = os.path.join(settings.UPLOAD_DIR, str(current_user["_id"]))
+            os.makedirs(user_upload_dir, exist_ok=True)
+            unique_id = str(uuid.uuid4())
+            file_path = os.path.join(user_upload_dir, f"{unique_id}.{ext}")
+            with open(file_path, "wb") as f:
+                f.write(file_bytes)
+            logger.info(f"Saved dataset locally to: {file_path}")
+            
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload to Cloudinary failed: {str(e)}")
+        logger.error(f"Dataset upload storage failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Dataset storage failed: {str(e)}")
 
     doc = {
-        "cloudinary_url": cloudinary_res["url"],
-        "public_id": cloudinary_res["public_id"],
+        "cloudinary_url": cloudinary_res["url"] if cloudinary_res else None,
+        "public_id": cloudinary_res["public_id"] if cloudinary_res else None,
+        "file_path": file_path,
         "file_name": file.filename,
         "name": file.filename,
         "file_type": ext,
