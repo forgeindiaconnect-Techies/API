@@ -246,7 +246,14 @@ export const chatAPI = {
 
         if (!res.ok) {
           const errText = await res.text().catch(() => '')
-          throw new Error(errText || `Request failed with status ${res.status}`)
+          let errMsg = errText
+          try {
+            const parsed = JSON.parse(errText)
+            if (parsed && parsed.detail) {
+              errMsg = parsed.detail
+            }
+          } catch {}
+          throw new Error(errMsg || `Request failed with status ${res.status}`)
         }
 
         return handleStream(res)

@@ -151,13 +151,22 @@ async def ensure_dataset_indexed(dataset_id: str, db) -> str:
     if not dataset:
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_id} not found")
 
+    # If the index is already building/processing, raise a clean error
+    if dataset.get("status") == "processing":
+        raise HTTPException(
+            status_code=400,
+            detail="This dataset is currently being indexed. Please try again in a few seconds."
+        )
+
+    # Trigger indexing in the background to avoid blocking the HTTP request
     from services.dataset_service import build_index_for_dataset
-    try:
-        index_id = await build_index_for_dataset(dataset, db)
-        return index_id
-    except Exception as e:
-        logger.error(f"Failed to auto-index dataset {dataset_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to index dataset: {str(e)}")
+    logger.info(f"Triggering background index build for dataset: {dataset_id}")
+    asyncio.create_task(build_index_for_dataset(dataset, db))
+
+    raise HTTPException(
+        status_code=400,
+        detail="Grounding context is not ready. Indexing has been started in the background. Please try again in a few seconds."
+    )
 
 
 @router.options("/conversations/{conversation_id}/stream")
@@ -178,6 +187,11 @@ async def stream_message(
 ):
     db = get_db()
 
+    # Pre-validate/ensure dataset is indexed BEFORE starting the SSE stream
+    index_id = data.index_id
+    if data.dataset_id:
+        index_id = await ensure_dataset_indexed(data.dataset_id, db)
+
     # 1. Save user message immediately to DB
     user_msg = {
         "role": "user",
@@ -191,15 +205,10 @@ async def stream_message(
     async def generate_response():
         try:
             # Check if context was selected
-            if not data.dataset_id and not data.index_id:
+            if not data.dataset_id and not index_id:
                 answer_content = "Please select a dataset file from the 'Add Context' dropdown above to begin searching."
                 sources = []
             else:
-                index_id = data.index_id
-                if data.dataset_id:
-                    # Enforce that the dataset is indexed
-                    index_id = await ensure_dataset_indexed(data.dataset_id, db)
-                
                 from services.chat_service import query_dataset_rag
                 rag_res = await query_dataset_rag(index_id, data.content, top_k=3, db=db)
                 answer_content = rag_res["answer"]
