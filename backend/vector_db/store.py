@@ -341,6 +341,12 @@ def get_embedding_model(model_name: str = "all-MiniLM-L6-v2"):
 
     # 2. Try SentenceTransformer
     try:
+        # Avoid loading heavy SentenceTransformer on resource-constrained containers (e.g. Render Free Tier)
+        import os
+        if os.environ.get("RENDER") == "true" or settings.ENVIRONMENT == "production":
+            logger.warning("Bypassing SentenceTransformer on Render/Production to avoid OOM. Using HashingTFIDFEmbedder instead.")
+            return HashingTFIDFEmbedder(384)
+
         if _shared_embedding_model is None:
             logger.info(f"Initializing SentenceTransformer model: {model_name} on CPU...")
             try:

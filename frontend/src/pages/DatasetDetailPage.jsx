@@ -260,7 +260,10 @@ Generate a structured response with these EXACT headings:
               <h3 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>Processing Timeout</h3>
               <p className="text-sm max-w-sm" style={{ color: 'var(--text-muted)' }}>{pollingError}</p>
             </div>
-            <button onClick={loadData} className="btn-primary">Refresh</button>
+            <div className="flex gap-3">
+              <button onClick={loadData} className="btn-primary">Refresh</button>
+              <button onClick={handleReprocess} className="btn-ghost">Force Reprocess</button>
+            </div>
           </>
         ) : (
           <>

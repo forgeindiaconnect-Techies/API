@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import List, Optional
 from bson import ObjectId
 from bson.errors import InvalidId
-import os, shutil, uuid, logging
+import os, shutil, uuid, logging, asyncio
 
 from models import DatasetResponse, ProcessingOptions, EDAResponse
 from auth.utils import get_current_user, validate_object_id
