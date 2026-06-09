@@ -114,13 +114,10 @@ async def initialize_app_bg():
     logger.info(f"Delaying heavy initialization tasks by {delay_sec} seconds to ensure immediate API port binding...")
     await asyncio.sleep(delay_sec)
     
-    # 2. Preload embedding model asynchronously in the background to avoid event-loop blocking
-    try:
-        from vector_db.store import get_embedding_model_async
-        logger.info("Scheduling background pre-loading of embedding model...")
-        asyncio.create_task(get_embedding_model_async("paraphrase-MiniLM-L3-v2"))
-    except Exception as preload_err:
-        logger.error(f"Failed to schedule background model pre-loading: {preload_err}")
+    # 2. Lazy Model Loading: The embedding model will be loaded lazily on demand
+    # instead of pre-loading at startup to stay within the 512MB RAM Render Free Tier limit.
+    logger.info("Bypassing startup model pre-loading to optimize memory usage (lazy loading is active).")
+
 
     # 3. RAG index startup recovery check
     logger.info("Starting RAG startup recovery checks...")
@@ -268,7 +265,8 @@ app.include_router(chat_router, prefix=PREFIX)
 app.include_router(datasets_router, prefix=PREFIX)
 app.include_router(models_router, prefix=PREFIX)
 app.include_router(rag_router, prefix=PREFIX)
-app.include_router(api_keys_router, prefix=PREFIX)
+app.include_router(api_keys_router, prefix=f"{PREFIX}/api-keys")
+app.include_router(api_keys_router, prefix=f"{PREFIX}/api_keys")
 app.include_router(analytics_router, prefix=PREFIX)
 app.include_router(ai_router, prefix=PREFIX)
 

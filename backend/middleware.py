@@ -12,48 +12,82 @@ from bson.errors import InvalidId
 logger = logging.getLogger(__name__)
 
 
-class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        # Suppress logging for HEAD health checks to keep production logs clean
-        if request.method == "HEAD" and request.url.path in ("/", "/api/health"):
-            return await call_next(request)
+class RequestLoggingMiddleware:
+    """
+    Pure ASGI middleware for request logging and injection of CORS headers.
+    Avoids BaseHTTPMiddleware to prevent event-loop and stream buffering issues.
+    """
+    def __init__(self, app):
+        self.app = app
 
-        origin = request.headers.get("origin")
-        auth_header = request.headers.get("authorization")
-        masked_auth = f"{auth_header[:25]}..." if auth_header and len(auth_header) > 25 else ("Bearer Present" if auth_header else "None")
-        logger.info(f"Incoming Request: {request.method} {request.url.path} | Origin: {origin} | Auth: {masked_auth}")
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-        start = time.time()
+        method = scope.get("method", "GET")
+        path = scope.get("path", "")
+        
+        # Get headers directly from scope to be fast and safe
+        headers_dict = {}
+        for k, v in scope.get("headers", []):
+            headers_dict[k.decode("latin1").lower()] = v.decode("latin1")
+
+        origin = headers_dict.get("origin")
+        auth_header = headers_dict.get("authorization")
+        
+        is_health = method == "HEAD" and path in ("/", "/api/health")
+        
+        if not is_health:
+            masked_auth = f"{auth_header[:25]}..." if auth_header and len(auth_header) > 25 else ("Bearer Present" if auth_header else "None")
+            logger.info(f"Incoming Request: {method} {path} | Origin: {origin} | Auth: {masked_auth}")
+
+        start_time = time.time()
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                response_headers = list(message.get("headers", []))
+                
+                # Check if CORS headers are already set to avoid duplication
+                has_cors = any(h[0].lower() == b"access-control-allow-origin" for h in response_headers)
+                
+                if not has_cors:
+                    allowed_origins = [
+                        "https://d-ai-nu.vercel.app",
+                        "http://localhost:3000",
+                        "http://localhost:5173"
+                    ]
+                    resolved_origin = "https://d-ai-nu.vercel.app"
+                    if origin:
+                        if origin in allowed_origins or (origin.startswith("https://") and origin.endswith(".vercel.app")):
+                            resolved_origin = origin
+                    
+                    response_headers.append((b"access-control-allow-origin", resolved_origin.encode("utf-8")))
+                    response_headers.append((b"access-control-allow-credentials", b"true"))
+                    response_headers.append((b"access-control-allow-methods", b"GET, POST, PUT, DELETE, OPTIONS, HEAD"))
+                    response_headers.append((b"access-control-allow-headers", b"*"))
+                    response_headers.append((b"access-control-expose-headers", b"*"))
+                
+                # Add process time header
+                duration = round((time.time() - start_time) * 1000, 2)
+                response_headers.append((b"x-process-time", str(duration).encode("utf-8")))
+                
+                message["headers"] = response_headers
+                
+                if not is_health:
+                    status_code = message.get("status", 200)
+                    logger.info(
+                        f"{method} {path} → {status_code} ({duration}ms) | "
+                        f"CORS Allow-Origin: {resolved_origin if not has_cors else 'Already Set'}"
+                    )
+            
+            await send(message)
+
         try:
-            response = await call_next(request)
-            duration = round((time.time() - start) * 1000, 2)
-
-            # Set manual CORS headers on all responses so it's always set (even on errors, preflights, and streaming)
-            allowed_origins = [
-                "https://d-ai-nu.vercel.app",
-                "http://localhost:3000",
-                "http://localhost:5173"
-            ]
-            if origin:
-                if origin in allowed_origins or (origin.startswith("https://") and origin.endswith(".vercel.app")):
-                    response.headers["Access-Control-Allow-Origin"] = origin
-                else:
-                    response.headers["Access-Control-Allow-Origin"] = "https://d-ai-nu.vercel.app"
-                response.headers["Access-Control-Allow-Credentials"] = "true"
-                response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, HEAD"
-                response.headers["Access-Control-Allow-Headers"] = "*"
-            elif not response.headers.get("access-control-allow-origin"):
-                response.headers["Access-Control-Allow-Origin"] = "https://d-ai-nu.vercel.app"
-
-            logger.info(
-                f"{request.method} {request.url.path} → {response.status_code} ({duration}ms) | "
-                f"CORS Allow-Origin: {response.headers.get('access-control-allow-origin')}"
-            )
-
-            response.headers["X-Process-Time"] = str(duration)
-            return response
+            await self.app(scope, receive, send_wrapper)
         except Exception as e:
-            logger.error(f"Request failed: {request.method} {request.url.path} | Error: {e}")
+            if not is_health:
+                logger.error(f"Request failed: {method} {path} | Error: {e}", exc_info=True)
             raise
 
 

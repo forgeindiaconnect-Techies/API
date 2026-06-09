@@ -19,6 +19,8 @@ ENV HF_HOME=/root/.cache/huggingface
 # Force ONNX Runtime to execute on CPU and suppress GPU-seeking warnings
 ENV ORT_LOGGING_LEVEL=3
 ENV ONNXRUNTIME_PROVIDERS=CPUExecutionProvider
+# Ensure stdout/stderr streams are sent straight to terminal without buffering
+ENV PYTHONUNBUFFERED=1
 
 COPY . .
 

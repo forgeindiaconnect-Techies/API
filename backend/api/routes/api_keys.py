@@ -11,7 +11,7 @@ from database import get_db
 from bson import ObjectId
 from bson.errors import InvalidId
 
-router = APIRouter(prefix="/api-keys", tags=["API Keys"])
+router = APIRouter(tags=["API Keys"])
 logger = logging.getLogger(__name__)
 
 
