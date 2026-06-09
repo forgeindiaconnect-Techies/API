@@ -19,7 +19,6 @@ ENV HF_HOME=/root/.cache/huggingface
 # Force ONNX Runtime to execute on CPU and suppress GPU-seeking warnings
 ENV ORT_LOGGING_LEVEL=3
 ENV ONNXRUNTIME_PROVIDERS=CPUExecutionProvider
-RUN python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='sentence-transformers/paraphrase-MiniLM-L3-v2')"
 
 COPY . .
 

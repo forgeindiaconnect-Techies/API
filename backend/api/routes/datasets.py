@@ -78,16 +78,25 @@ async def list_datasets(current_user=Depends(get_current_user)):
         logger.error("list_datasets: Database connection wrapper is None")
         raise HTTPException(status_code=500, detail="Database connection unavailable")
     
-    datasets = []
+    user_query = get_user_query(current_user)
+    logger.info(f"list_datasets: querying datasets for user_query={user_query}")
+    
     try:
-        user_query = get_user_query(current_user)
-        logger.info(f"list_datasets: querying datasets for user_query={user_query}")
-        async for d in db.datasets.find({"user_id": user_query}):
-            try:
-                datasets.append(fmt_dataset(d))
-            except Exception as fe:
-                logger.error(f"Error formatting dataset document {d.get('_id')}: {fe}", exc_info=True)
-                continue
+        async def fetch_db_datasets():
+            datasets = []
+            async for d in db.datasets.find({"user_id": user_query}):
+                try:
+                    datasets.append(fmt_dataset(d))
+                except Exception as fe:
+                    logger.error(f"Error formatting dataset document {d.get('_id')}: {fe}", exc_info=True)
+                    continue
+            return datasets
+
+        # Wrap in a 4-second timeout to prevent API hangs
+        datasets = await asyncio.wait_for(fetch_db_datasets(), timeout=4.0)
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout (4s) exceeded while listing datasets for user: {current_user.get('_id')}")
+        raise HTTPException(status_code=504, detail="Database query timed out. Please try again.")
     except Exception as e:
         logger.error(f"Failed to query datasets from MongoDB: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Database query failed: {str(e)}")

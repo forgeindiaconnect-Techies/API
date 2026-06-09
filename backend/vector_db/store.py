@@ -372,31 +372,39 @@ def get_embedding_model(model_name: str = "paraphrase-MiniLM-L3-v2"):
     if _shared_embedding_model is not None:
         return _shared_embedding_model
 
-    try:
-        logger.info(f"Attempting to load lightweight SentenceTransformer model: {model_name} on CPU...")
-        import gc
+    import os
+    os.environ["ORT_LOGGING_LEVEL"] = "3"
+    os.environ["ONNXRUNTIME_PROVIDERS"] = '["CPUExecutionProvider"]'
+    os.environ["HF_HUB_HTTP_TIMEOUT"] = "15"
+    os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
+    max_attempts = 2
+    for attempt in range(max_attempts):
         try:
-            import torch
-            torch.set_num_threads(1)
-            logger.info("Set PyTorch num_threads to 1 for CPU optimization.")
-        except Exception as torch_err:
-            logger.warning(f"Failed to set PyTorch num_threads: {torch_err}")
+            logger.info(f"Attempting to load SentenceTransformer model: {model_name} on CPU (attempt {attempt + 1}/{max_attempts})...")
+            import gc
+            try:
+                import torch
+                torch.set_num_threads(1)
+                logger.info("Set PyTorch num_threads to 1 for CPU optimization.")
+            except Exception as torch_err:
+                logger.warning(f"Failed to set PyTorch num_threads: {torch_err}")
+                
+            from sentence_transformers import SentenceTransformer
+            _shared_embedding_model = SentenceTransformer(model_name, device="cpu")
             
-        # Suppress ONNX Runtime and device discovery warnings
-        import os
-        os.environ["ORT_LOGGING_LEVEL"] = "3"
-        os.environ["ONNXRUNTIME_PROVIDERS"] = '["CPUExecutionProvider"]'
-        
-        from sentence_transformers import SentenceTransformer
-        _shared_embedding_model = SentenceTransformer(model_name, device="cpu")
-        
-        # Clean up any unused references/memory immediately after loading
-        gc.collect()
-        logger.info(f"Using SentenceTransformer: {model_name}")
-        return _shared_embedding_model
-    except (MemoryError, RuntimeError, Exception) as e:
-        logger.warning(f"Falling back to TFIDFEmbedder. Reason: {e}")
-        return HashingTFIDFEmbedder(384)
+            # Clean up any unused references/memory immediately after loading
+            gc.collect()
+            logger.info(f"Using SentenceTransformer: {model_name}")
+            return _shared_embedding_model
+        except (MemoryError, RuntimeError, Exception) as e:
+            logger.warning(f"Failed to load SentenceTransformer (attempt {attempt + 1}/{max_attempts}): {e}")
+            if attempt < max_attempts - 1:
+                import time
+                time.sleep(2)
+            else:
+                logger.error(f"All attempts to load SentenceTransformer failed. Falling back to HashingTFIDFEmbedder.")
+                return HashingTFIDFEmbedder(384)
 
 
 async def get_embedding_model_async(model_name: str = "paraphrase-MiniLM-L3-v2"):
