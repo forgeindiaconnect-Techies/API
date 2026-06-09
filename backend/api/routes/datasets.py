@@ -6,7 +6,7 @@ from bson.errors import InvalidId
 import os, shutil, uuid, logging
 
 from models import DatasetResponse, ProcessingOptions, EDAResponse
-from auth.utils import get_current_user
+from auth.utils import get_current_user, validate_object_id
 from database import get_db
 from config import settings
 from datasets.processor import process_dataset, run_eda
@@ -53,21 +53,8 @@ def get_user_query(current_user: dict) -> dict:
 async def fetch_user_dataset_or_raise(dataset_id: str, current_user: dict) -> dict:
     logger.info(f"Fetching dataset details for ID: {dataset_id} | User: {current_user.get('_id')}")
     
-    # Check if dataset_id is a valid 24-character hex string (standard MongoDB ObjectId format)
-    is_valid_hex = len(dataset_id) == 24 and all(c in "0123456789abcdefABCDEF" for c in dataset_id)
-    if not is_valid_hex:
-        logger.warning(f"ObjectId validation failed for ID: '{dataset_id}'")
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid dataset ID format: '{dataset_id}'. MongoDB ObjectId must be exactly 24 hex characters."
-        )
-
-    try:
-        oid = ObjectId(dataset_id)
-        id_query = {"$in": [oid, dataset_id]}
-    except (InvalidId, Exception):
-        logger.warning(f"Invalid dataset ID format parsed: {dataset_id}")
-        id_query = dataset_id
+    oid = validate_object_id(dataset_id)
+    id_query = {"$in": [oid, dataset_id]}
 
     db = get_db()
     if db is None:

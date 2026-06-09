@@ -6,6 +6,8 @@ from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from config import settings
 from database import get_db
+from bson import ObjectId
+from bson.errors import InvalidId
 import logging
 
 logger = logging.getLogger(__name__)
@@ -81,18 +83,107 @@ def decode_token(token: str, expected_type: str = "access") -> Dict[str, Any]:
         )
 
 
+def validate_object_id(id_str: str) -> ObjectId:
+    if not id_str:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ID string cannot be empty"
+        )
+    try:
+        return ObjectId(id_str)
+    except (InvalidId, TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid ID format: '{id_str}'. Must be a 24-character hex string."
+        )
+
 
 async def get_current_user(
     request: Request,
 ):
+    # First check if middleware already authenticated and set the user in state
     user = getattr(request.state, "user", None)
-    if not user:
+    if user:
+        logger.info(f"get_current_user: User found in request state: {user.get('email')} (ID: {user.get('_id')})")
+        return user
+
+    # Otherwise, extract from Authorization header
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        logger.warning("get_current_user: Missing or invalid Authorization header")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required",
+            detail="Not authenticated: missing or invalid Authorization header",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return user
+
+    token = auth_header.split(" ")[1]
+    logger.info("get_current_user: Extracting Bearer token from authorization header")
+    try:
+        payload = decode_token(token, expected_type="access")
+        user_id = payload.get("sub")
+        logger.info(f"get_current_user: Token decoded successfully. User ID (sub): {user_id}")
+        if not user_id:
+            logger.warning("get_current_user: Token sub payload missing user_id")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token payload",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        db = get_db()
+        if db is None:
+            logger.error("get_current_user: Database connection unavailable")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Database connection unavailable"
+            )
+
+        # Support both string and ObjectId formats for the user _id lookup
+        if len(user_id) == 24:
+            try:
+                user_oid = ObjectId(user_id)
+                user_query = {"_id": {"$in": [user_id, user_oid]}}
+            except (InvalidId, TypeError, ValueError) as oid_err:
+                logger.warning(f"get_current_user: Invalid user_id format in sub: '{user_id}' | Error: {oid_err}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid User ID format: '{user_id}'. Must be a 24-character hex string."
+                )
+        else:
+            user_query = {"_id": user_id}
+
+        logger.info(f"get_current_user: Querying database for user with query: {user_query}")
+        user = await db.users.find_one(user_query)
+        if not user:
+            logger.warning(f"get_current_user: User not found in database for sub: {user_id}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        if user.get("disabled"):
+            logger.warning(f"get_current_user: Account disabled for user: {user_id}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Account disabled"
+            )
+
+        # Set user in request state for subsequent lookups in this request
+        request.state.user = user
+        logger.info(f"get_current_user: Successfully authenticated user: {user.get('email')} (ID: {user_id})")
+        return user
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"get_current_user: Unexpected authentication dependency error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Authentication failed: {str(e)}",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 async def get_current_active_user(current_user=Depends(get_current_user)):

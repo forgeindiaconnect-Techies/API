@@ -48,12 +48,24 @@ class LoRATrainer:
         model_id = self.config.get("base_model", "facebook/opt-125m")
         technique = self.config.get("technique", "LoRA")
 
+        # Authenticate with HuggingFace for gated models
+        hf_token = os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_TOKEN")
+        if hf_token:
+            try:
+                from huggingface_hub import login
+                login(token=hf_token)
+                logger.info("Authenticated with HuggingFace Hub")
+            except Exception as hf_err:
+                logger.warning(f"HuggingFace login failed: {hf_err}")
+
         logger.info(f"Loading model {model_id}")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id, token=hf_token)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         load_kwargs = {}
+        if hf_token:
+            load_kwargs["token"] = hf_token
         if technique == "QLoRA":
             try:
                 from transformers import BitsAndBytesConfig

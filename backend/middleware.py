@@ -5,6 +5,9 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from auth.utils import decode_token
 from database import get_db
+from bson import ObjectId
+from bson.errors import InvalidId
+
 
 logger = logging.getLogger(__name__)
 
@@ -130,9 +133,11 @@ class AuthMiddleware:
             return
 
         token = auth_header.split(" ")[1]
+        logger.info(f"AuthMiddleware: Extracted Bearer token for protected path '{path}'")
         try:
             payload = decode_token(token, expected_type="access")
             user_id = payload.get("sub")
+            logger.info(f"AuthMiddleware: Token decoded successfully. User ID (sub): {user_id}")
             if not user_id:
                 logger.warning(f"AuthMiddleware: Token sub payload missing user_id for token on path '{path}'")
                 response = self._cors_response(origin, 401, {"detail": "Invalid token payload"})
@@ -147,7 +152,23 @@ class AuthMiddleware:
                 return
 
             # Support both string and ObjectId formats for the user _id lookup
-            user_query = {"_id": {"$in": [user_id, ObjectId(user_id)]} if len(user_id) == 24 else user_id}
+            if len(user_id) == 24:
+                try:
+                    user_oid = ObjectId(user_id)
+                    user_query = {"_id": {"$in": [user_id, user_oid]}}
+                except (InvalidId, TypeError, ValueError) as oid_err:
+                    logger.warning(f"AuthMiddleware: Invalid user_id format in sub: '{user_id}' | Error: {oid_err}")
+                    response = self._cors_response(
+                        origin,
+                        400,
+                        {"detail": f"Invalid User ID format: '{user_id}'. Must be a 24-character hex string."}
+                    )
+                    await response(scope, receive, send)
+                    return
+            else:
+                user_query = {"_id": user_id}
+
+            logger.info(f"AuthMiddleware: Querying database for user with query: {user_query}")
             user = await db.users.find_one(user_query)
             if not user:
                 logger.warning(f"AuthMiddleware: User not found in database for sub: {user_id}")

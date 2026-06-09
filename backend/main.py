@@ -28,31 +28,117 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def initialize_app_bg():
-    logger.info("Starting background application initialization...")
+def get_rss_memory_mb() -> float:
+    """Return the current RSS memory usage of the process in MB."""
+    import os
     try:
-        # 1. Connect to MongoDB
-        await connect_db()
+        import psutil
+        process = psutil.Process(os.getpid())
+        return process.memory_info().rss / (1024 * 1024)
+    except ImportError:
+        pass
         
-        # 2. Trigger eager load of the embedding model to cache it in memory
-        logger.info("Eager loading embedding model in background...")
-        try:
-            from vector_db.store import get_embedding_model
-            await asyncio.to_thread(get_embedding_model)
-            logger.info("Embedding model pre-loaded successfully.")
-        except Exception as embed_err:
-            logger.error(f"Eager loading embedding model failed: {embed_err}")
+    try:
+        if os.path.exists("/proc/self/status"):
+            with open("/proc/self/status", "r") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            return float(parts[1]) / 1024.0
+    except Exception:
+        pass
+        
+    try:
+        import resource
+        import sys
+        maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if sys.platform != "darwin":
+            return maxrss / 1024.0
+        else:
+            return maxrss / (1024.0 * 1024.0)
+    except Exception:
+        pass
+        
+    return 0.0
 
-        # 3. RAG index startup recovery check
-        try:
-            from services.startup_rebuild import run_startup_recovery
-            await run_startup_recovery()
-            logger.info("Background startup recovery checks completed.")
-        except Exception as recovery_err:
-            logger.error(f"Startup recovery failed: {recovery_err}")
 
+def acquire_startup_lock() -> bool:
+    """Acquire a file lock to ensure only one worker performs startup tasks."""
+    import os
+    import time
+    persist_dir = os.environ.get("CHROMA_PERSIST_DIR", "./chroma_db")
+    os.makedirs(persist_dir, exist_ok=True)
+    lock_file = os.path.join(persist_dir, "startup.lock")
+    
+    if os.path.exists(lock_file):
+        try:
+            mtime = os.path.getmtime(lock_file)
+            if time.time() - mtime < 120:
+                logger.info("Startup lock exists and is fresh. Skipping startup tasks for this worker.")
+                return False
+        except Exception:
+            pass
+            
+    try:
+        with open(lock_file, "w") as f:
+            f.write(str(os.getpid()))
+        return True
     except Exception as e:
-        logger.error(f"Critical error during background application initialization: {e}", exc_info=True)
+        logger.warning(f"Failed to acquire startup lock: {e}")
+        return False
+
+
+async def initialize_app_bg():
+    import time
+    start_time = time.time()
+    initial_mem = get_rss_memory_mb()
+    logger.info(f"Starting background app initialization (Initial Memory: {initial_mem:.2f} MB)...")
+    
+    # 1. Connect to MongoDB
+    try:
+        await connect_db()
+    except Exception as e:
+        logger.error(f"Startup MongoDB connection failed: {e}")
+        
+    db_conn_time = time.time()
+    logger.info(f"MongoDB connection time: {db_conn_time - start_time:.2f}s (Memory: {get_rss_memory_mb():.2f} MB)")
+    
+    # Check worker lock to avoid duplicate loading across multiple workers
+    if not acquire_startup_lock():
+        logger.info("Skipping heavy initialization tasks (model pre-load, RAG recovery) for this worker.")
+        return
+
+    # Add a delay to let the server bind the port and become healthy first
+    delay_sec = 10
+    logger.info(f"Delaying heavy initialization tasks by {delay_sec} seconds to ensure immediate API port binding...")
+    await asyncio.sleep(delay_sec)
+    
+    # 2. Trigger eager load of the embedding model to cache it in memory
+    logger.info("Eager loading embedding model in background...")
+    model_start = time.time()
+    try:
+        from vector_db.store import get_embedding_model
+        await asyncio.to_thread(get_embedding_model)
+        model_time = time.time() - model_start
+        logger.info(f"Embedding model loaded successfully in {model_time:.2f}s (Memory: {get_rss_memory_mb():.2f} MB)")
+    except Exception as embed_err:
+        logger.error(f"Eager loading embedding model failed: {embed_err}")
+
+    # 3. RAG index startup recovery check
+    logger.info("Starting RAG startup recovery checks...")
+    recovery_start = time.time()
+    try:
+        from services.startup_rebuild import run_startup_recovery
+        await run_startup_recovery()
+        recovery_time = time.time() - recovery_start
+        logger.info(f"RAG startup recovery checks completed in {recovery_time:.2f}s (Memory: {get_rss_memory_mb():.2f} MB)")
+    except Exception as recovery_err:
+        logger.error(f"Startup recovery failed: {recovery_err}")
+        
+    total_time = time.time() - start_time
+    final_mem = get_rss_memory_mb()
+    logger.info(f"Background app initialization completed in {total_time:.2f}s. Final Memory: {final_mem:.2f} MB (Delta: {final_mem - initial_mem:.2f} MB)")
 
 
 @asynccontextmanager
@@ -67,6 +153,17 @@ async def lifespan(app: FastAPI):
     if not init_task.done():
         init_task.cancel()
     await disconnect_db()
+    
+    # Clean up startup lock
+    try:
+        import os
+        persist_dir = os.environ.get("CHROMA_PERSIST_DIR", "./chroma_db")
+        lock_file = os.path.join(persist_dir, "startup.lock")
+        if os.path.exists(lock_file):
+            os.remove(lock_file)
+            logger.info("Cleaned up startup lock file.")
+    except Exception:
+        pass
 
 
 app = FastAPI(

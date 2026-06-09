@@ -11,8 +11,12 @@ class ChromaManager:
     @classmethod
     def get_client(cls):
         if cls._client is None:
-            logger.info(f"Initializing singleton ChromaDB PersistentClient at path: {settings.CHROMA_PERSIST_DIR}")
-            cls._client = chromadb.PersistentClient(path=settings.CHROMA_PERSIST_DIR)
+            logger.info(f"Initializing singleton ChromaDB PersistentClient at path: {settings.CHROMA_PERSIST_DIR} (Telemetry: Disabled)")
+            from chromadb.config import Settings
+            cls._client = chromadb.PersistentClient(
+                path=settings.CHROMA_PERSIST_DIR,
+                settings=Settings(anonymized_telemetry=False)
+            )
         return cls._client
 
 async def run_with_retry_async(func, *args, **kwargs):

@@ -82,3 +82,42 @@ def build_rag_index_task(self, index_id: str, file_path: str, config: dict):
         "chunk_count": 342,
         "status": "ready",
     }
+
+
+@celery_app.task(bind=True, name="workers.tasks.rebuild_dataset_index_task", max_retries=2)
+def rebuild_dataset_index_task(self, dataset_id: str):
+    """Rebuild a dataset's RAG index in the background"""
+    import asyncio
+    from database import get_db, connect_db
+    from services.dataset_service import build_index_for_dataset
+
+    logger.info(f"Celery Worker: Starting RAG index rebuild for dataset {dataset_id}")
+
+    async def _run():
+        db = get_db()
+        if db is None:
+            await connect_db()
+            db = get_db()
+
+        dataset = await db.datasets.find_one({"_id": dataset_id})
+        if not dataset:
+            logger.error(f"Celery Worker: Dataset {dataset_id} not found.")
+            return
+
+        await build_index_for_dataset(dataset, db)
+        logger.info(f"Celery Worker: Finished RAG index rebuild for dataset {dataset_id}")
+
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    if loop.is_running():
+        # Run using a separate thread since we are in a running event loop
+        import threading
+        t = threading.Thread(target=lambda: asyncio.run(_run()))
+        t.start()
+        t.join()
+    else:
+        loop.run_until_complete(_run())

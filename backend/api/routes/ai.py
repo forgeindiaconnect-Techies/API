@@ -191,8 +191,6 @@ async def generate_image(data: GenerateImageRequest, current_user=Depends(get_cu
         }
 
 
-_embedding_models_cache = {}
-
 @router.post("/embed")
 async def create_embeddings(
     texts: list[str],
@@ -200,21 +198,32 @@ async def create_embeddings(
     current_user=Depends(get_current_user),
 ):
     try:
-        if model not in _embedding_models_cache:
-            from sentence_transformers import SentenceTransformer
-            _embedding_models_cache[model] = SentenceTransformer(model)
-        st_model = _embedding_models_cache[model]
+        from vector_db.store import get_embedding_model
+        st_model = get_embedding_model(model_name=model)
         embeddings = st_model.encode(texts)
+        if hasattr(embeddings, "tolist"):
+            emb_list = embeddings.tolist()
+            dimensions = embeddings.shape[1] if hasattr(embeddings, "shape") else len(emb_list[0])
+        elif isinstance(embeddings, list):
+            emb_list = embeddings
+            dimensions = len(embeddings[0]) if embeddings else 384
+        else:
+            import numpy as np
+            arr = np.array(embeddings)
+            emb_list = arr.tolist()
+            dimensions = arr.shape[1] if len(arr.shape) > 1 else len(emb_list[0])
+            
         return {
-            "embeddings": embeddings.tolist(),
+            "embeddings": emb_list,
             "model": model,
-            "dimensions": embeddings.shape[1],
+            "dimensions": dimensions,
         }
-    except ImportError:
+    except Exception as e:
+        logger.warning(f"Failed to generate embeddings: {e}. Trying fallback mock embeddings...")
         import random
         return {
             "embeddings": [[random.uniform(-1, 1) for _ in range(384)] for _ in texts],
             "model": model,
             "dimensions": 384,
-            "note": "Demo embeddings. Install sentence-transformers for real embeddings.",
+            "note": f"Demo embeddings. Error: {str(e)}",
         }

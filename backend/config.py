@@ -2,6 +2,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, AliasChoices, field_validator
 from typing import List, Optional
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env
+load_dotenv()
+
 
 
 class Settings(BaseSettings):
@@ -47,7 +52,15 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     DEFAULT_MODEL: str = "llama3"
     OPENAI_API_KEY: str = ""
-    HUGGINGFACE_TOKEN: str = ""
+    HUGGINGFACE_TOKEN: str = Field(
+        default="",
+        validation_alias=AliasChoices("HUGGINGFACE_TOKEN", "HF_TOKEN")
+    )
+    HF_TOKEN: str = Field(
+        default="",
+        validation_alias=AliasChoices("HF_TOKEN", "HUGGINGFACE_TOKEN")
+    )
+    TESSERACT_PATH: str = ""
 
     # Storage
     UPLOAD_DIR: str = "./uploads"
