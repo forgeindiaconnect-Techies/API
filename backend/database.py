@@ -89,7 +89,7 @@ class DatabaseWrapper:
 async def connect_db():
     global client, db
     try:
-        client = AsyncIOMotorClient(settings.MONGODB_URL)
+        client = AsyncIOMotorClient(settings.MONGODB_URL, serverSelectionTimeoutMS=5000)
         raw_db = client[settings.MONGODB_DB_NAME]
         # Ping to verify connection
         await raw_db.command("ping")
@@ -118,6 +118,11 @@ async def create_indexes():
         await db.models.create_index([("user_id", ASCENDING)])
         await db.chat_history.create_index([("user_id", ASCENDING)])
         await db.chat_history.create_index([("conversation_id", ASCENDING)])
+        await db.messages.create_index([("user_id", ASCENDING)])
+        await db.messages.create_index([("conversation_id", ASCENDING)])
+        await db.messages.create_index([("created_at", DESCENDING)])
+        await db.rag_indexes.create_index([("user_id", ASCENDING)])
+        await db.rag_indexes.create_index([("dataset_id", ASCENDING)])
         await db.api_keys.create_index([("key_hash", ASCENDING)], unique=True)
         await db.api_keys.create_index([("user_id", ASCENDING)])
         await db.training_logs.create_index([("job_id", ASCENDING)])

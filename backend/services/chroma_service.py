@@ -22,7 +22,7 @@ class ChromaManager:
 async def run_with_retry_async(func, *args, **kwargs):
     """
     Run ChromaDB database operation with retry logic for SQLite locked database errors.
-    Uses asyncio.sleep to keep the event loop unblocked.
+    Uses asyncio.to_thread to keep the event loop unblocked.
     """
     max_attempts = 5
     delay = 2.0
@@ -31,7 +31,7 @@ async def run_with_retry_async(func, *args, **kwargs):
             if asyncio.iscoroutinefunction(func):
                 return await func(*args, **kwargs)
             else:
-                return func(*args, **kwargs)
+                return await asyncio.to_thread(func, *args, **kwargs)
         except Exception as e:
             err_msg = str(e).lower()
             if "database is locked" in err_msg or "db is locked" in err_msg or "code: 5" in err_msg or "locked" in err_msg:
@@ -50,7 +50,7 @@ async def run_with_retry_async(func, *args, **kwargs):
 async def collection_is_empty(collection_name: str) -> bool:
     """Check if a ChromaDB collection is empty or does not exist."""
     try:
-        client = ChromaManager.get_client()
+        client = await asyncio.to_thread(ChromaManager.get_client)
         if client is None:
             return True
             

@@ -4,6 +4,7 @@ Vector database abstraction supporting ChromaDB and FAISS.
 from typing import List, Dict, Any, Optional, Tuple
 import logging
 import os
+import asyncio
 
 from config import settings
 
@@ -31,7 +32,19 @@ class VectorStore:
         self.backend = backend
         self.collection_name = collection_name
         self._store = None
-        self._init_store()
+        self._initialized = False
+        self._init_lock = None
+
+    async def ensure_initialized(self):
+        if self._initialized:
+            return
+        if not hasattr(self, "_init_lock") or self._init_lock is None:
+            self._init_lock = asyncio.Lock()
+        async with self._init_lock:
+            if self._initialized:
+                return
+            await asyncio.to_thread(self._init_store)
+            self._initialized = True
 
     def _init_store(self):
         if self.backend == "chroma":
@@ -111,6 +124,7 @@ class VectorStore:
         metadatas: Optional[List[Dict]] = None,
         ids: Optional[List[str]] = None,
     ) -> int:
+        await self.ensure_initialized()
         if not ids:
             ids = [f"doc_{i}" for i in range(len(documents))]
         if not metadatas:
@@ -168,6 +182,7 @@ class VectorStore:
         query_embedding: List[float],
         top_k: int = 5,
     ) -> List[Dict[str, Any]]:
+        await self.ensure_initialized()
         if self.backend == "chroma" and self._collection:
             from services.chroma_service import run_with_retry_async
             def op():
@@ -204,6 +219,7 @@ class VectorStore:
         return []
 
     async def delete(self, ids: List[str]):
+        await self.ensure_initialized()
         if self.backend == "chroma" and self._collection:
             from services.chroma_service import run_with_retry_async
             def op():
@@ -211,6 +227,7 @@ class VectorStore:
             await run_with_retry_async(op)
 
     async def count(self) -> int:
+        await self.ensure_initialized()
         if self.backend == "chroma" and self._collection:
             from services.chroma_service import run_with_retry_async
             count_val = await run_with_retry_async(self._collection.count)

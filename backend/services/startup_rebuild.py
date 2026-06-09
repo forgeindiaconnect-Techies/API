@@ -89,6 +89,9 @@ async def run_startup_recovery():
                 dispatch_rebuild_task(dataset_id)
             else:
                 logger.info(f"Startup recovery: Dataset '{dataset.get('name') or dataset.get('file_name')}' index {index_id} is verified healthy.")
+            
+            # Cooperative yield to prevent event loop starvation
+            await asyncio.sleep(0.1)
                 
     except Exception as e:
         logger.error(f"Error during RAG startup recovery check: {e}")
