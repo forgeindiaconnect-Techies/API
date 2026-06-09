@@ -22,7 +22,13 @@ async def get_dashboard(current_user=Depends(get_current_user)):
     # Count resources
     dataset_count = await db.datasets.count_documents({"user_id": user_id})
     model_count = await db.models.count_documents({"user_id": user_id})
-    api_key_count = await db.api_keys.count_documents({"user_id": user_id, "status": "active"})
+    api_key_count = await db.api_keys.count_documents({
+        "user_id": user_id,
+        "$or": [
+            {"is_active": True},
+            {"is_active": {"$exists": False}, "status": "active"}
+        ]
+    })
     conv_count = await db.conversations.count_documents({"user_id": user_id})
 
     # Count total requests and tokens from messages

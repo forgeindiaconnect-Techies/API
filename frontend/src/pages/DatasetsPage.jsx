@@ -22,10 +22,16 @@ const fileTypeIcon = (type) => {
 
 const statusBadge = (status) => {
   switch (status) {
-    case 'ready': return <span className="badge badge-green flex items-center gap-1"><CheckCircle size={9} /> Ready</span>
-    case 'processing': return <span className="badge badge-yellow flex items-center gap-1"><Clock size={9} /> Processing</span>
-    case 'error': return <span className="badge badge-red flex items-center gap-1"><AlertCircle size={9} /> Error</span>
-    default: return <span className="badge badge-violet flex items-center gap-1"><Clock size={9} /> Pending</span>
+    case 'ready':
+    case 'completed':
+      return <span className="badge badge-green flex items-center gap-1"><CheckCircle size={9} /> Ready</span>
+    case 'processing':
+      return <span className="badge badge-yellow flex items-center gap-1"><Clock size={9} /> Processing</span>
+    case 'error':
+    case 'failed':
+      return <span className="badge badge-red flex items-center gap-1"><AlertCircle size={9} /> Error</span>
+    default:
+      return <span className="badge badge-violet flex items-center gap-1"><Clock size={9} /> Pending</span>
   }
 }
 

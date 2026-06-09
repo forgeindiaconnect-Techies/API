@@ -268,6 +268,7 @@ export const datasetAPI = {
   process: (id, options) => api.post(`/datasets/${id}/process`, options),
   getEDA: (id) => api.get(`/datasets/${id}/eda`),
   getPreview: (id) => api.get(`/datasets/${id}/preview`),
+  getStatus: (id) => api.get(`/datasets/${id}/status`),
   getStats: (id) => api.get(`/datasets/${id}/stats`),
 }
 
@@ -301,6 +302,7 @@ export const apiKeyAPI = {
   list: () => api.get('/api-keys'),
   create: (data) => api.post('/api-keys', data),
   revoke: (id) => api.delete(`/api-keys/${id}`),
+  rename: (id, name) => api.patch(`/api-keys/${id}`, { name }),
   rotate: (id) => api.post(`/api-keys/${id}/rotate`),
   getUsage: (id) => api.get(`/api-keys/${id}/usage`),
 }

@@ -28,6 +28,7 @@ export default function DatasetDetailPage() {
   const [loading, setLoading] = useState(true)
   const [reprocessing, setReprocessing] = useState(false)
   const [error, setError] = useState(null)
+  const [pollingError, setPollingError] = useState(null)
   
   // AI summary state
   const [aiSummary, setAiSummary] = useState('')
@@ -52,7 +53,7 @@ export default function DatasetDetailPage() {
       console.log(`[DatasetDetailPage] Dataset details successfully loaded:`, dsRes.data);
       setDataset(dsRes.data)
 
-      if (dsRes.data.status === 'ready') {
+      if (dsRes.data.status === 'ready' || dsRes.data.status === 'completed' || dsRes.data.status === 'indexed') {
         const supportEDA = ['csv', 'xlsx', 'xls', 'txt', 'md', 'pdf', 'docx'].includes(dsRes.data.file_type)
         const supportPreview = ['csv', 'xlsx', 'xls', 'txt', 'md', 'pdf', 'docx', 'json'].includes(dsRes.data.file_type)
         
@@ -97,22 +98,52 @@ export default function DatasetDetailPage() {
     loadData()
   }, [id])
 
+  useEffect(() => {
+    let intervalId;
+    let secondsElapsed = 0;
+    
+    if (dataset && (dataset.status === 'processing' || reprocessing)) {
+      setPollingError(null);
+      intervalId = setInterval(async () => {
+        secondsElapsed += 2;
+        if (secondsElapsed > 60) {
+          clearInterval(intervalId);
+          setPollingError("Processing is taking longer than expected. Please refresh.");
+          setReprocessing(false);
+          return;
+        }
+        
+        try {
+          const res = await datasetAPI.getStatus(id);
+          const currentStatus = res.data.status;
+          
+          if (currentStatus === 'completed' || currentStatus === 'ready' || currentStatus === 'indexed') {
+            clearInterval(intervalId);
+            setReprocessing(false);
+            setPollingError(null);
+            loadData();
+          } else if (currentStatus === 'failed' || currentStatus === 'error') {
+            clearInterval(intervalId);
+            setReprocessing(false);
+            setDataset(prev => prev ? { ...prev, status: 'failed', error_message: res.data.error_message || 'Processing failed' } : null);
+          }
+        } catch (err) {
+          console.error("Error polling status:", err);
+        }
+      }, 2000);
+    }
+    
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [dataset?.status, reprocessing, id]);
+
   const handleReprocess = async () => {
     try {
       setReprocessing(true)
+      setPollingError(null)
       await datasetAPI.process(id, {})
-      toast.success('Reprocessing scheduled')
-      // Poll dataset until it is ready
-      let attempts = 0
-      const interval = setInterval(async () => {
-        attempts++
-        const res = await datasetAPI.get(id)
-        if (res.data.status === 'ready' || res.data.status === 'error' || attempts > 10) {
-          clearInterval(interval)
-          setReprocessing(false)
-          loadData()
-        }
-      }, 2000)
+      toast.success('Reprocessing started')
     } catch (err) {
       toast.error('Failed to reprocess')
       setReprocessing(false)
@@ -222,18 +253,31 @@ Generate a structured response with these EXACT headings:
   if (dataset.status === 'processing' || reprocessing) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[400px] text-center p-6 space-y-4">
-        <Loader size={48} className="animate-spin" style={{ color: 'var(--accent-primary)' }} />
-        <div className="space-y-1">
-          <h3 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>Dataset Processing in Progress</h3>
-          <p className="text-sm max-w-sm" style={{ color: 'var(--text-muted)' }}>
-            We are analyzing columns, counting rows, and running calculations. This will take a moment.
-          </p>
-        </div>
+        {pollingError ? (
+          <>
+            <AlertCircle size={48} style={{ color: '#ef4444' }} />
+            <div className="space-y-1">
+              <h3 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>Processing Timeout</h3>
+              <p className="text-sm max-w-sm" style={{ color: 'var(--text-muted)' }}>{pollingError}</p>
+            </div>
+            <button onClick={loadData} className="btn-primary">Refresh</button>
+          </>
+        ) : (
+          <>
+            <Loader size={48} className="animate-spin" style={{ color: 'var(--accent-primary)' }} />
+            <div className="space-y-1">
+              <h3 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>Dataset Processing in Progress</h3>
+              <p className="text-sm max-w-sm" style={{ color: 'var(--text-muted)' }}>
+                We are analyzing columns, counting rows, and running calculations. This will take a moment.
+              </p>
+            </div>
+          </>
+        )}
       </div>
     )
   }
 
-  if (dataset.status === 'error') {
+  if (dataset.status === 'error' || dataset.status === 'failed') {
     return (
       <div className="flex flex-col items-center justify-center min-h-[400px] text-center p-6 space-y-4">
         <AlertCircle size={48} style={{ color: '#ef4444' }} />

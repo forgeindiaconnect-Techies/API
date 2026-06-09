@@ -203,13 +203,20 @@ async def verify_api_key(api_key: str) -> Optional[Dict]:
     import hashlib
     db = get_db()
     key_hash = hashlib.sha256(api_key.encode()).hexdigest()
-    key_doc = await db.api_keys.find_one({"key_hash": key_hash, "status": "active"})
+    key_doc = await db.api_keys.find_one({
+        "key_hash": key_hash,
+        "$or": [
+            {"is_active": True},
+            {"is_active": {"$exists": False}, "status": "active"}
+        ]
+    })
     if not key_doc:
         return None
 
     # Update last_used
+    now_utc = datetime.now(timezone.utc)
     await db.api_keys.update_one(
         {"_id": key_doc["_id"]},
-        {"$set": {"last_used_at": datetime.now(timezone.utc)}, "$inc": {"requests_count": 1}}
+        {"$set": {"last_used": now_utc, "last_used_at": now_utc}, "$inc": {"requests_count": 1}}
     )
     return key_doc

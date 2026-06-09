@@ -301,6 +301,12 @@ class ApiKeyResponse(BaseModel):
     created_at: datetime
     last_used_at: Optional[datetime] = None
     expires_at: Optional[datetime] = None
+    is_active: bool = True
+    last_used: Optional[datetime] = None
+
+
+class ApiKeyUpdate(BaseModel):
+    name: str
 
 
 # ─── Analytics ────────────────────────────────────────────────────────────────

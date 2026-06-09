@@ -256,66 +256,9 @@ async def delete_dataset(dataset_id: str, current_user=Depends(get_current_user)
     return {"message": "Dataset deleted"}
 
 
-@router.post("/{dataset_id}/process")
-async def reprocess_dataset(
-    dataset_id: str,
-    options: ProcessingOptions,
-    background_tasks: BackgroundTasks,
-    current_user=Depends(get_current_user),
-):
-    d = await fetch_user_dataset_or_raise(dataset_id, current_user)
-    db = get_db()
-    if db is None:
-        logger.error("Database connection wrapper is None")
-        raise HTTPException(status_code=500, detail="Database connection unavailable")
-        
-    await db.datasets.update_one({"_id": d["_id"]}, {"$set": {"status": "processing"}})
-    from services.dataset_service import build_index_for_dataset
-    background_tasks.add_task(
-        build_index_for_dataset, d, db
-    )
-    return {"message": "Processing started"}
-
-
-@router.get("/{dataset_id}/eda")
-async def get_eda(dataset_id: str, current_user=Depends(get_current_user)):
-    d = await fetch_user_dataset_or_raise(dataset_id, current_user)
-    if d.get("status") not in ("ready", "indexed"):
-        raise HTTPException(status_code=400, detail="Dataset not processed yet")
-
-    temp_path = None
-    is_temp = False
+def _generate_preview(temp_path: str, ext: str, rows: int = 20) -> dict:
     try:
-        from services.dataset_service import get_dataset_file
-        temp_path, is_temp = await get_dataset_file(d)
-        eda = await run_eda(temp_path, d.get("file_type", ""))
-        return eda
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if temp_path and is_temp and os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except Exception as clean_err:
-                logger.error(f"Failed to delete temp file {temp_path}: {clean_err}")
-
-
-@router.get("/{dataset_id}/preview")
-async def get_preview(
-    dataset_id: str,
-    rows: int = 20,
-    current_user=Depends(get_current_user)
-):
-    d = await fetch_user_dataset_or_raise(dataset_id, current_user)
-
-    temp_path = None
-    is_temp = False
-    try:
-        from services.dataset_service import get_dataset_file
-        temp_path, is_temp = await get_dataset_file(d)
-        
         import pandas as pd
-        ext = d["file_type"]
         if not os.path.exists(temp_path):
             return {"columns": [], "rows": []}
 
@@ -395,6 +338,155 @@ async def get_preview(
                 }
         else:
             return {"columns": [], "rows": [], "message": f"Preview not available for file type .{ext}"}
+    except Exception as e:
+        logger.error(f"Error generating preview: {e}")
+        return {"columns": [], "rows": [], "error": str(e)}
+
+
+@router.post("/{dataset_id}/process")
+async def reprocess_dataset(
+    dataset_id: str,
+    options: Optional[ProcessingOptions] = None,
+    current_user=Depends(get_current_user),
+):
+    d = await fetch_user_dataset_or_raise(dataset_id, current_user)
+    db = get_db()
+    if db is None:
+        logger.error("Database connection wrapper is None")
+        raise HTTPException(status_code=500, detail="Database connection unavailable")
+        
+    await db.datasets.update_one({"_id": d["_id"]}, {"$set": {"status": "processing", "error_message": None}})
+    
+    temp_path = None
+    is_temp = False
+    try:
+        from services.dataset_service import get_dataset_file
+        from datasets.processor import _process_sync, _eda_sync
+        
+        # 1. Download/get dataset file
+        temp_path, is_temp = await get_dataset_file(d)
+        
+        # 2. Extract metadata, EDA, and preview
+        meta_res = await asyncio.to_thread(_process_sync, temp_path, d.get("file_type", ""))
+        eda_res = await asyncio.to_thread(_eda_sync, temp_path, d.get("file_type", ""))
+        preview_res = await asyncio.to_thread(_generate_preview, temp_path, d.get("file_type", ""))
+        
+        # 3. Update MongoDB with completed status and all fields
+        rows = meta_res.get("rows")
+        cols = meta_res.get("cols")
+        columns = meta_res.get("columns", [])
+        
+        update_doc = {
+            "status": "completed",
+            "rows": rows,
+            "cols": cols,
+            "row_count": rows,
+            "columns": columns,
+            "stats": eda_res,
+            "preview": preview_res,
+            "processed_at": datetime.utcnow(),
+            "error_message": None
+        }
+        
+        await db.datasets.update_one({"_id": d["_id"]}, {"$set": update_doc})
+        
+        updated_d = await db.datasets.find_one({"_id": d["_id"]})
+        return fmt_dataset(updated_d)
+        
+    except Exception as e:
+        logger.error(f"Processing failed for dataset {dataset_id}: {e}", exc_info=True)
+        await db.datasets.update_one(
+            {"_id": d["_id"]},
+            {"$set": {"status": "failed", "error_message": str(e)}}
+        )
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+    finally:
+        if temp_path and is_temp and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception as clean_err:
+                logger.error(f"Failed to remove temp file {temp_path}: {clean_err}")
+
+
+@router.get("/{dataset_id}/status")
+async def get_dataset_status(
+    dataset_id: str,
+    current_user=Depends(get_current_user)
+):
+    d = await fetch_user_dataset_or_raise(dataset_id, current_user)
+    
+    # Progress estimation:
+    # "completed" -> 100
+    # "ready", "indexed" -> 100
+    # "processing" -> 50
+    # "failed", "error" -> 0
+    # others -> 10
+    status = d.get("status", "pending")
+    progress = 0
+    if status in ("completed", "ready", "indexed"):
+        progress = 100
+    elif status == "processing":
+        progress = 50
+    elif status in ("failed", "error"):
+        progress = 0
+    else:
+        progress = 10
+        
+    return {"status": status, "progress": progress}
+
+
+@router.get("/{dataset_id}/eda")
+async def get_eda(dataset_id: str, current_user=Depends(get_current_user)):
+    d = await fetch_user_dataset_or_raise(dataset_id, current_user)
+    
+    # Return pre-computed stats if available
+    if d.get("stats"):
+        return d["stats"]
+        
+    if d.get("status") not in ("ready", "indexed", "completed"):
+        raise HTTPException(status_code=400, detail="Dataset not processed yet")
+
+    temp_path = None
+    is_temp = False
+    try:
+        from services.dataset_service import get_dataset_file
+        temp_path, is_temp = await get_dataset_file(d)
+        eda = await run_eda(temp_path, d.get("file_type", ""))
+        return eda
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if temp_path and is_temp and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception as clean_err:
+                logger.error(f"Failed to delete temp file {temp_path}: {clean_err}")
+
+
+@router.get("/{dataset_id}/preview")
+async def get_preview(
+    dataset_id: str,
+    rows: int = 20,
+    current_user=Depends(get_current_user)
+):
+    d = await fetch_user_dataset_or_raise(dataset_id, current_user)
+    
+    # Return pre-computed preview if available
+    if d.get("preview"):
+        preview_data = d["preview"]
+        if "rows" in preview_data and isinstance(preview_data["rows"], list):
+            return {
+                "columns": preview_data.get("columns", []),
+                "rows": preview_data["rows"][:rows]
+            }
+        return preview_data
+
+    temp_path = None
+    is_temp = False
+    try:
+        from services.dataset_service import get_dataset_file
+        temp_path, is_temp = await get_dataset_file(d)
+        return _generate_preview(temp_path, d.get("file_type", ""), rows)
     except Exception as e:
         return {"columns": [], "rows": [], "error": str(e)}
     finally:

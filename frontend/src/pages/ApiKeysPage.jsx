@@ -1,21 +1,24 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Key, Plus, Copy, Trash2, Eye, EyeOff, Shield, X, Check, Loader, AlertCircle } from 'lucide-react'
+import { Key, Plus, Copy, Trash2, Shield, X, Check, Loader, AlertCircle, Edit2 } from 'lucide-react'
 import { apiKeyAPI } from '../services/api'
 import { useApiKeyStore } from '../store'
 import toast from 'react-hot-toast'
 
 export default function ApiKeysPage() {
-  const { apiKeys, setApiKeys, addApiKey, removeApiKey } = useApiKeyStore()
+  const { apiKeys, setApiKeys } = useApiKeyStore()
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
   
-  // Newly created key modal details
+  // Newly created key modal details (one-time display)
   const [createdKeyData, setCreatedKeyData] = useState(null)
   
-  const [revealed, setRevealed] = useState({})
   const [copied, setCopied] = useState({})
   const [newKey, setNewKey] = useState({ name: '', scopes: ['chat'], rate_limit: 10000 })
+
+  // Inline renaming states
+  const [editingId, setEditingId] = useState(null)
+  const [editingName, setEditingName] = useState("")
 
   const SCOPES = ['chat', 'predict', 'embed', 'transcribe', 'generate-image']
 
@@ -36,21 +39,50 @@ export default function ApiKeysPage() {
   }, [])
 
   const copyKey = (id, key) => {
+    if (!key) return
     navigator.clipboard.writeText(key)
     setCopied({ ...copied, [id]: true })
     toast.success('Copied to clipboard')
     setTimeout(() => setCopied(prev => ({ ...prev, [id]: false })), 2000)
   }
 
-  const revokeKey = async (id) => {
+  const revokeKey = async (id, name) => {
+    const confirmed = window.confirm(`Are you sure you want to revoke the API key "${name}"? This action cannot be undone and external services using it will stop working immediately.`)
+    if (!confirmed) return
+
     try {
       await apiKeyAPI.revoke(id)
-      removeApiKey(id)
       toast.success('API key revoked')
       fetchKeys()
     } catch (err) {
       toast.error('Failed to revoke API key')
     }
+  }
+
+  const renameKey = async (id) => {
+    if (!editingName.trim()) {
+      toast.error('Name cannot be empty')
+      return
+    }
+    try {
+      await apiKeyAPI.rename(id, editingName.trim())
+      toast.success('API key renamed')
+      setEditingId(null)
+      setEditingName("")
+      fetchKeys()
+    } catch (err) {
+      toast.error('Failed to rename API key')
+    }
+  }
+
+  const startRename = (id, name) => {
+    setEditingId(id)
+    setEditingName(name)
+  }
+
+  const cancelRename = () => {
+    setEditingId(null)
+    setEditingName("")
   }
 
   const createKey = async () => {
@@ -61,8 +93,7 @@ export default function ApiKeysPage() {
         scopes: newKey.scopes,
         rate_limit: newKey.rate_limit,
       })
-      addApiKey(data)
-      setCreatedKeyData(data) // Set this to trigger the one-time display modal
+      setCreatedKeyData(data) // Triggers the warning display modal
       setShowCreate(false)
       setNewKey({ name: '', scopes: ['chat'], rate_limit: 10000 })
       toast.success('API key created successfully!')
@@ -72,7 +103,12 @@ export default function ApiKeysPage() {
     }
   }
 
-  const maskKey = (prefix) => `${prefix}${'•'.repeat(24)}`
+  const maskKey = (prefix) => `${prefix || 'sk-••••'}••••••••`
+
+  const formatLastUsed = (dateVal) => {
+    if (!dateVal) return 'Never used'
+    return new Date(dateVal).toLocaleString()
+  }
 
   return (
     <div className="p-6 space-y-5 max-w-5xl mx-auto">
@@ -80,7 +116,7 @@ export default function ApiKeysPage() {
         <div>
           <h1 className="text-xl font-bold" style={{ color: 'var(--text-primary)' }}>API Keys</h1>
           <p className="text-sm mt-0.5" style={{ color: 'var(--text-muted)' }}>
-            Manage access keys for your inference endpoints
+            Manage access credentials for your models and inference endpoints
           </p>
         </div>
         <button onClick={() => setShowCreate(true)} className="btn-primary">
@@ -107,7 +143,7 @@ export default function ApiKeysPage() {
               <div className="space-y-3">
                 <div>
                   <label className="block text-xs font-semibold mb-1.5" style={{ color: 'var(--text-secondary)' }}>Name</label>
-                  <input className="input-base" placeholder="e.g. Production API" value={newKey.name}
+                  <input className="input-base" placeholder="e.g. Production Client" value={newKey.name}
                     onChange={e => setNewKey({ ...newKey, name: e.target.value })} />
                 </div>
 
@@ -159,16 +195,16 @@ export default function ApiKeysPage() {
               className="card-elevated w-full max-w-lg p-6 space-y-4"
               onClick={e => e.stopPropagation()}>
               <div className="flex items-center justify-between">
-                <h3 className="font-bold text-lg" style={{ color: 'var(--text-primary)' }}>Save Your API Key</h3>
+                <h3 className="font-bold text-lg text-yellow-500" style={{ color: 'var(--text-primary)' }}>Copy your API Key</h3>
                 <button onClick={() => setCreatedKeyData(null)} style={{ color: 'var(--text-muted)' }}><X size={18} /></button>
               </div>
 
               <div className="p-4 rounded-lg bg-yellow-950/20 border border-yellow-700/30 flex items-start gap-3">
-                <AlertCircle className="flex-shrink-0 mt-0.5" size={18} style={{ color: 'var(--accent-primary)' }} />
+                <AlertCircle className="flex-shrink-0 mt-0.5" size={18} style={{ color: '#f59e0b' }} />
                 <div className="text-xs space-y-1">
-                  <p className="font-semibold text-yellow-200">Security Warning</p>
+                  <p className="font-semibold text-yellow-500">Copy this key now — it will never be shown again</p>
                   <p style={{ color: 'var(--text-muted)' }}>
-                    For security reasons, this key will only be shown **once**. If you navigate away or close this modal, you will not be able to retrieve it again. Please copy and store it safely.
+                    For security reasons, this key can only be displayed this one time. Save it in a password manager or secure vault. If you close this window, the key cannot be recovered.
                   </p>
                 </div>
               </div>
@@ -232,32 +268,68 @@ export default function ApiKeysPage() {
             <motion.div key={k.id} className="card p-5"
               initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.06 }}>
               <div className="flex items-start justify-between mb-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-lg flex items-center justify-center"
-                    style={{ background: k.status === 'active' ? 'rgba(16,185,129,0.1)' : 'var(--bg-tertiary)' }}>
-                    <Key size={15} style={{ color: k.status === 'active' ? '#10b981' : 'var(--text-muted)' }} />
+                <div className="flex items-center gap-3 flex-1 min-w-0">
+                  <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
+                    style={{ background: k.is_active ? 'rgba(16,185,129,0.1)' : 'var(--bg-tertiary)' }}>
+                    <Key size={15} style={{ color: k.is_active ? '#10b981' : 'var(--text-muted)' }} />
                   </div>
-                  <div>
-                    <p className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>{k.name}</p>
+                  <div className="flex-1 min-w-0">
+                    {editingId === k.id ? (
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <input
+                          className="input-base text-sm py-1 px-2.5 max-w-[240px]"
+                          value={editingName}
+                          onChange={e => setEditingName(e.target.value)}
+                          autoFocus
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') renameKey(k.id)
+                            if (e.key === 'Escape') cancelRename()
+                          }}
+                        />
+                        <button onClick={() => renameKey(k.id)} className="p-1 rounded bg-green-500/10 text-green-400 hover:bg-green-500/20" title="Save">
+                          <Check size={14} />
+                        </button>
+                        <button onClick={cancelRename} className="p-1 rounded bg-red-500/10 text-red-400 hover:bg-red-500/20" title="Cancel">
+                          <X size={14} />
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <p className="font-semibold text-sm truncate" style={{ color: 'var(--text-primary)' }}>{k.name}</p>
+                        {k.is_active && (
+                          <button onClick={() => startRename(k.id, k.name)} className="p-0.5 text-slate-500 hover:text-slate-300 transition-colors" title="Rename Key">
+                            <Edit2 size={12} />
+                          </button>
+                        )}
+                      </div>
+                    )}
                     <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
                       Created {new Date(k.created_at).toLocaleDateString()}
                     </p>
                   </div>
                 </div>
-                <span className={`badge ${k.status === 'active' ? 'badge-green' : 'badge-red'}`}>{k.status}</span>
+                <span className={`badge ${k.is_active ? 'badge-green' : 'badge-red'}`}>
+                  {k.is_active ? 'Active' : 'Revoked'}
+                </span>
               </div>
 
               {/* Key Value */}
-              <div className="flex items-center gap-2 p-3 rounded-lg mb-3"
+              <div className="flex items-center justify-between gap-2 p-3 rounded-lg mb-3"
                 style={{ background: 'var(--bg-tertiary)', fontFamily: 'JetBrains Mono, monospace' }}>
                 <code className="text-xs flex-1 truncate" style={{ color: 'var(--text-secondary)' }}>
-                  {revealed[k.id] ? k.key : maskKey(k.key_prefix)}
+                  {maskKey(k.key_prefix)}
                 </code>
+                {k.is_active && (
+                  <button onClick={() => copyKey(k.id, maskKey(k.key_prefix))}
+                    className="flex-shrink-0 p-1 text-slate-500 hover:text-slate-300 transition-colors"
+                    title="Copy Prefix">
+                    <Copy size={13} />
+                  </button>
+                )}
               </div>
 
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  {/* Scopes */}
                   <div className="flex gap-1 flex-wrap">
                     {k.scopes.map(s => <span key={s} className="badge badge-violet text-xs">{s}</span>)}
                   </div>
@@ -275,8 +347,12 @@ export default function ApiKeysPage() {
                       <div className="progress-fill" style={{ width: `${Math.min(100, (k.requests_count / k.rate_limit) * 100)}%` }} />
                     </div>
                   </div>
-                  {k.status === 'active' && (
-                    <button onClick={() => revokeKey(k.id)}
+                  <div className="text-right min-w-[120px]">
+                    <p className="text-[10px] uppercase tracking-wider font-semibold" style={{ color: 'var(--text-muted)' }}>Last Used</p>
+                    <p className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>{formatLastUsed(k.last_used)}</p>
+                  </div>
+                  {k.is_active && (
+                    <button onClick={() => revokeKey(k.id, k.name)}
                       className="p-1.5 rounded transition-colors"
                       style={{ color: 'var(--text-muted)' }}
                       onMouseEnter={(e) => e.currentTarget.style.color = '#ef4444'}
@@ -301,7 +377,7 @@ export default function ApiKeysPage() {
           </p>
           <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
             Include your key as: <code className="text-xs px-1.5 py-0.5 rounded" style={{ background: 'var(--bg-tertiary)', color: 'var(--accent-primary)' }}>
-              Authorization: Bearer sk-...
+              Authorization: Bearer your-full-api-key
             </code>
           </p>
         </div>
