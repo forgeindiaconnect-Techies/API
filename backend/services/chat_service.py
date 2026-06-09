@@ -69,7 +69,7 @@ async def query_dataset_rag(index_id: str, question: str, top_k: int = 5, db = N
 
     # 2. Get active embedder model (tiered fallback)
     try:
-        embedder = get_embedding_model(index.get("embedding_model", "all-MiniLM-L6-v2"))
+        embedder = get_embedding_model(index.get("embedding_model", "paraphrase-MiniLM-L3-v2"))
     except Exception as e:
         logger.error(f"Failed to load embedding model: {e}")
         return {"answer": "Embedding generation failed.", "sources": []}

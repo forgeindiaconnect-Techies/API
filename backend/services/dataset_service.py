@@ -153,7 +153,7 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         new_index = {
             "name": f"{file_name} index",
             "dataset_id": dataset_id,
-            "embedding_model": "all-MiniLM-L6-v2",
+            "embedding_model": "paraphrase-MiniLM-L3-v2",
             "chunk_size": 500 if file_type in ("txt", "md", "docx") else 512,
             "chunk_overlap": 100 if file_type in ("txt", "md", "docx") else 50,
             "index_type": index_type,
@@ -181,7 +181,7 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             raise Exception("No text content could be extracted from this dataset.")
             
         # 5. Generate embeddings & Store in VectorStore
-        embedder = get_embedding_model("all-MiniLM-L6-v2")
+        embedder = get_embedding_model("paraphrase-MiniLM-L3-v2")
         
         embeddings = []
         batch_size = 32

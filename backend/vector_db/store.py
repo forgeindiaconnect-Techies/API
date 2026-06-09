@@ -327,9 +327,13 @@ class HashingTFIDFEmbedder:
 
 _shared_embedding_model = None
 
-def get_embedding_model(model_name: str = "all-MiniLM-L6-v2"):
+def get_embedding_model(model_name: str = "paraphrase-MiniLM-L3-v2"):
     """Load embedding model with fallbacks to OpenAI and HashingTFIDFEmbedder to ensure zero crashes"""
     global _shared_embedding_model
+
+    # Map the old default to the new lightweight model name to ensure consistency
+    if model_name == "all-MiniLM-L6-v2":
+        model_name = "paraphrase-MiniLM-L3-v2"
 
     # 1. Try OpenAI if API key is present
     if settings.OPENAI_API_KEY and not settings.OPENAI_API_KEY.startswith("sk-..."):
@@ -340,30 +344,31 @@ def get_embedding_model(model_name: str = "all-MiniLM-L6-v2"):
             logger.error(f"Failed to initialize OpenAIEmbedder: {e}. Falling back to SentenceTransformer.")
 
     # 2. Try SentenceTransformer
-    try:
-        # Avoid loading heavy SentenceTransformer on resource-constrained containers (e.g. Render Free Tier)
-        import os
-        if os.environ.get("RENDER") == "true" or settings.ENVIRONMENT == "production":
-            logger.warning("Bypassing SentenceTransformer on Render/Production to avoid OOM. Using HashingTFIDFEmbedder instead.")
-            return HashingTFIDFEmbedder(384)
-
-        if _shared_embedding_model is None:
-            logger.info(f"Initializing SentenceTransformer model: {model_name} on CPU...")
-            try:
-                import torch
-                torch.set_num_threads(1)
-                logger.info("Set PyTorch num_threads to 1 for CPU optimization.")
-            except Exception as torch_err:
-                logger.warning(f"Failed to set PyTorch num_threads: {torch_err}")
-                
-            # Double force ONNX Runtime to CPU and suppress card0 discovery warnings
-            import os
-            os.environ["ORT_LOGGING_LEVEL"] = "3"
-            os.environ["ONNXRUNTIME_PROVIDERS"] = '["CPUExecutionProvider"]'
-            
-            from sentence_transformers import SentenceTransformer
-            _shared_embedding_model = SentenceTransformer(model_name, device="cpu")
+    if _shared_embedding_model is not None:
         return _shared_embedding_model
-    except Exception as e:
-        logger.error(f"Failed to initialize SentenceTransformer ({e}). Falling back to HashingTFIDFEmbedder.")
+
+    try:
+        logger.info(f"Attempting to load lightweight SentenceTransformer model: {model_name} on CPU...")
+        import gc
+        try:
+            import torch
+            torch.set_num_threads(1)
+            logger.info("Set PyTorch num_threads to 1 for CPU optimization.")
+        except Exception as torch_err:
+            logger.warning(f"Failed to set PyTorch num_threads: {torch_err}")
+            
+        # Suppress ONNX Runtime and device discovery warnings
+        import os
+        os.environ["ORT_LOGGING_LEVEL"] = "3"
+        os.environ["ONNXRUNTIME_PROVIDERS"] = '["CPUExecutionProvider"]'
+        
+        from sentence_transformers import SentenceTransformer
+        _shared_embedding_model = SentenceTransformer(model_name, device="cpu")
+        
+        # Clean up any unused references/memory immediately after loading
+        gc.collect()
+        logger.info(f"Using SentenceTransformer: {model_name}")
+        return _shared_embedding_model
+    except (MemoryError, RuntimeError, Exception) as e:
+        logger.warning(f"Falling back to TFIDFEmbedder. Reason: {e}")
         return HashingTFIDFEmbedder(384)

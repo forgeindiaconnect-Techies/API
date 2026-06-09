@@ -233,7 +233,7 @@ class PredictResponse(BaseModel):
 class IndexCreate(BaseModel):
     dataset_id: str
     name: str
-    embedding_model: str = "all-MiniLM-L6-v2"
+    embedding_model: str = "paraphrase-MiniLM-L3-v2"
     chunk_size: int = 512
     chunk_overlap: int = 50
     index_type: str = "chroma"  # chroma, faiss

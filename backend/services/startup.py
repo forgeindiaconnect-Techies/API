@@ -48,7 +48,7 @@ async def run_startup_checks(app: FastAPI):
                         "chunk_size": index.get("chunk_size", 512),
                         "chunk_overlap": index.get("chunk_overlap", 50),
                         "index_type": index.get("index_type", "chroma"),
-                        "embedding_model": index.get("embedding_model", "all-MiniLM-L6-v2"),
+                        "embedding_model": index.get("embedding_model", "paraphrase-MiniLM-L3-v2"),
                     }
                     asyncio.create_task(_build_index(index_id, config, db))
                 else:

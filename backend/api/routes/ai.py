@@ -194,7 +194,7 @@ async def generate_image(data: GenerateImageRequest, current_user=Depends(get_cu
 @router.post("/embed")
 async def create_embeddings(
     texts: list[str],
-    model: str = "all-MiniLM-L6-v2",
+    model: str = "paraphrase-MiniLM-L3-v2",
     current_user=Depends(get_current_user),
 ):
     try:

@@ -114,16 +114,8 @@ async def initialize_app_bg():
     logger.info(f"Delaying heavy initialization tasks by {delay_sec} seconds to ensure immediate API port binding...")
     await asyncio.sleep(delay_sec)
     
-    # 2. Trigger eager load of the embedding model to cache it in memory
-    logger.info("Eager loading embedding model in background...")
-    model_start = time.time()
-    try:
-        from vector_db.store import get_embedding_model
-        await asyncio.to_thread(get_embedding_model)
-        model_time = time.time() - model_start
-        logger.info(f"Embedding model loaded successfully in {model_time:.2f}s (Memory: {get_rss_memory_mb():.2f} MB)")
-    except Exception as embed_err:
-        logger.error(f"Eager loading embedding model failed: {embed_err}")
+    # 2. Embedding model preloading removed to save memory at startup. Loaded lazily instead.
+    pass
 
     # 3. RAG index startup recovery check
     logger.info("Starting RAG startup recovery checks...")
