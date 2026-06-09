@@ -231,11 +231,11 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         logger.error(f"Failed to build index for dataset {dataset_id}: {e}", exc_info=True)
         await db.datasets.update_one(
             {"_id": dataset_doc["_id"]},
-            {"$set": {"status": "error", "error_message": str(e)}}
+            {"$set": {"status": "failed", "error_message": str(e)}}
         )
         await db.rag_indexes.update_one(
             {"_id": index_doc["_id"] if index_doc else res.inserted_id},
-            {"$set": {"status": "error", "error": str(e)}}
+            {"$set": {"status": "failed", "error": str(e)}}
         )
         raise
     finally:

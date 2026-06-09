@@ -211,7 +211,7 @@ async def upload_dataset(
             db_instance = get_db()
             await db_instance.datasets.update_one(
                 {"_id": ObjectId(dataset_doc["_id"])},
-                {"$set": {"status": "error", "error_message": f"Background processing failed: {str(bg_err)}"}}
+                {"$set": {"status": "failed", "error_message": f"Background processing failed: {str(bg_err)}"}}
             )
 
     background_tasks.add_task(
