@@ -120,17 +120,6 @@ async def get_current_user(
     token = auth_header.split(" ")[1]
     logger.info("get_current_user: Extracting Bearer token from authorization header")
     try:
-        payload = decode_token(token, expected_type="access")
-        user_id = payload.get("sub")
-        logger.info(f"get_current_user: Token decoded successfully. User ID (sub): {user_id}")
-        if not user_id:
-            logger.warning("get_current_user: Token sub payload missing user_id")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token payload",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-
         db = get_db()
         if db is None:
             logger.error("get_current_user: Database connection unavailable")
@@ -138,6 +127,60 @@ async def get_current_user(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Database connection unavailable"
             )
+
+        if token.startswith("sk-"):
+            logger.info("get_current_user: Validating API Key")
+            import hashlib
+            key_hash = hashlib.sha256(token.encode()).hexdigest()
+            key_doc = await db.api_keys.find_one({
+                "key_hash": key_hash,
+                "$or": [
+                    {"is_active": True},
+                    {"is_active": {"$exists": False}, "status": "active"}
+                ]
+            })
+            if not key_doc:
+                logger.warning("get_current_user: API Key not found or inactive")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid or inactive API Key",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            
+            # Check expiration
+            expires_at = key_doc.get("expires_at")
+            if expires_at:
+                if isinstance(expires_at, str):
+                    try:
+                        expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                    except ValueError:
+                        pass
+                if isinstance(expires_at, datetime) and expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+                    logger.warning("get_current_user: API Key expired")
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="API Key has expired",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+
+            user_id = key_doc.get("user_id")
+            # Update metrics
+            now_utc = datetime.now(timezone.utc)
+            await db.api_keys.update_one(
+                {"_id": key_doc["_id"]},
+                {"$set": {"last_used": now_utc, "last_used_at": now_utc}, "$inc": {"requests_count": 1}}
+            )
+        else:
+            payload = decode_token(token, expected_type="access")
+            user_id = payload.get("sub")
+            logger.info(f"get_current_user: Token decoded successfully. User ID (sub): {user_id}")
+            if not user_id:
+                logger.warning("get_current_user: Token sub payload missing user_id")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid token payload",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
 
         # Support both string and ObjectId formats for the user _id lookup
         if len(user_id) == 24:

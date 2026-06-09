@@ -169,21 +169,61 @@ class AuthMiddleware:
         token = auth_header.split(" ")[1]
         logger.info(f"AuthMiddleware: Extracted Bearer token for protected path '{path}'")
         try:
-            payload = decode_token(token, expected_type="access")
-            user_id = payload.get("sub")
-            logger.info(f"AuthMiddleware: Token decoded successfully. User ID (sub): {user_id}")
-            if not user_id:
-                logger.warning(f"AuthMiddleware: Token sub payload missing user_id for token on path '{path}'")
-                response = self._cors_response(origin, 401, {"detail": "Invalid token payload"})
-                await response(scope, receive, send)
-                return
-
             db = get_db()
             if db is None:
-                logger.error(f"AuthMiddleware: Database connection unavailable when validating token for sub: {user_id}")
+                logger.error("AuthMiddleware: Database connection unavailable when validating token")
                 response = self._cors_response(origin, 500, {"detail": "Database connection unavailable"})
                 await response(scope, receive, send)
                 return
+
+            if token.startswith("sk-"):
+                logger.info("AuthMiddleware: Validating API Key")
+                import hashlib
+                from datetime import datetime, timezone
+                key_hash = hashlib.sha256(token.encode()).hexdigest()
+                key_doc = await db.api_keys.find_one({
+                    "key_hash": key_hash,
+                    "$or": [
+                        {"is_active": True},
+                        {"is_active": {"$exists": False}, "status": "active"}
+                    ]
+                })
+                if not key_doc:
+                    logger.warning("AuthMiddleware: API Key not found or inactive")
+                    response = self._cors_response(origin, 401, {"detail": "Invalid or inactive API Key"})
+                    await response(scope, receive, send)
+                    return
+                
+                # Check expiration
+                expires_at = key_doc.get("expires_at")
+                if expires_at:
+                    if isinstance(expires_at, str):
+                        try:
+                            expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                        except ValueError:
+                            pass
+                    if isinstance(expires_at, datetime) and expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+                        logger.warning("AuthMiddleware: API Key expired")
+                        response = self._cors_response(origin, 401, {"detail": "API Key has expired"})
+                        await response(scope, receive, send)
+                        return
+
+                user_id = key_doc.get("user_id")
+                # Update metrics
+                now_utc = datetime.now(timezone.utc)
+                await db.api_keys.update_one(
+                    {"_id": key_doc["_id"]},
+                    {"$set": {"last_used": now_utc, "last_used_at": now_utc}, "$inc": {"requests_count": 1}}
+                )
+            else:
+                payload = decode_token(token, expected_type="access")
+                user_id = payload.get("sub")
+                logger.info(f"AuthMiddleware: Token decoded successfully. User ID (sub): {user_id}")
+                if not user_id:
+                    logger.warning(f"AuthMiddleware: Token sub payload missing user_id for token on path '{path}'")
+                    response = self._cors_response(origin, 401, {"detail": "Invalid token payload"})
+                    await response(scope, receive, send)
+                    return
 
             # Support both string and ObjectId formats for the user _id lookup
             if len(user_id) == 24:
