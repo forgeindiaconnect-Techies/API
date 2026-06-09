@@ -10,7 +10,7 @@ import json
 import asyncio
 from datetime import datetime
 from database import get_db
-from vector_db.store import VectorStore, get_embedding_model
+from vector_db.store import VectorStore, get_embedding_model, get_embedding_model_async
 from services.chroma_service import run_with_retry_async
 from datasets.processor import _process_sync
 
@@ -181,7 +181,7 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             raise Exception("No text content could be extracted from this dataset.")
             
         # 5. Generate embeddings & Store in VectorStore
-        embedder = get_embedding_model("paraphrase-MiniLM-L3-v2")
+        embedder = await get_embedding_model_async("paraphrase-MiniLM-L3-v2")
         
         embeddings = []
         batch_size = 32

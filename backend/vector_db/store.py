@@ -24,6 +24,13 @@ def sanitize_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
     return sanitized
 
 
+class DummyEmbeddingFunction:
+    """A dummy embedding function to prevent ChromaDB from initializing its heavy default ONNX model."""
+    def __call__(self, texts: List[str]) -> List[List[float]]:
+        # We compute embeddings ourselves and pass them explicitly, so this is never called
+        return [[0.0] * 384 for _ in texts]
+
+
 class VectorStore:
     """Unified interface for vector databases"""
 
@@ -73,6 +80,7 @@ class VectorStore:
                 self._collection = self._client.get_or_create_collection(
                     name=self.collection_name,
                     metadata={"hnsw:space": "cosine"},
+                    embedding_function=DummyEmbeddingFunction()
                 )
                 logger.info(f"ChromaDB collection '{self.collection_name}' ready")
                 return
@@ -389,3 +397,11 @@ def get_embedding_model(model_name: str = "paraphrase-MiniLM-L3-v2"):
     except (MemoryError, RuntimeError, Exception) as e:
         logger.warning(f"Falling back to TFIDFEmbedder. Reason: {e}")
         return HashingTFIDFEmbedder(384)
+
+
+async def get_embedding_model_async(model_name: str = "paraphrase-MiniLM-L3-v2"):
+    """Load embedding model asynchronously on a separate thread pool to prevent blocking the event loop."""
+    global _shared_embedding_model
+    if _shared_embedding_model is not None:
+        return _shared_embedding_model
+    return await asyncio.to_thread(get_embedding_model, model_name)

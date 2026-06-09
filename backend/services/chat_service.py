@@ -1,6 +1,6 @@
 import logging
 from database import get_db
-from vector_db.store import VectorStore, get_embedding_model
+from vector_db.store import VectorStore, get_embedding_model, get_embedding_model_async
 from ollama import AsyncClient
 from openai import AsyncOpenAI
 from config import settings
@@ -69,7 +69,7 @@ async def query_dataset_rag(index_id: str, question: str, top_k: int = 5, db = N
 
     # 2. Get active embedder model (tiered fallback)
     try:
-        embedder = get_embedding_model(index.get("embedding_model", "paraphrase-MiniLM-L3-v2"))
+        embedder = await get_embedding_model_async(index.get("embedding_model", "paraphrase-MiniLM-L3-v2"))
     except Exception as e:
         logger.error(f"Failed to load embedding model: {e}")
         return {"answer": "Embedding generation failed.", "sources": []}

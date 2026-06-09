@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from datetime import datetime
 import time
 import logging
+import asyncio
 
 from models import IndexCreate, IndexResponse, SearchRequest, SearchResponse, RAGChatRequest
 from auth.utils import get_current_user
@@ -59,11 +60,34 @@ async def create_index(
 
 @router.get("/indexes")
 async def list_indexes(current_user=Depends(get_current_user)):
+    user_id = str(current_user["_id"])
+    logger.info(f"Received GET /rag/indexes for user_id: {user_id}")
+    
     db = get_db()
-    indexes = []
-    async for i in db.rag_indexes.find({"user_id": str(current_user["_id"])}):
-        indexes.append(fmt_index(i))
-    return indexes
+    if db is None:
+        logger.error(f"Database connection not available when listing RAG indexes for user_id: {user_id}")
+        raise HTTPException(status_code=500, detail="Database connection not available")
+        
+    start_time = time.time()
+    try:
+        async def fetch_indexes():
+            indexes = []
+            cursor = db.rag_indexes.find({"user_id": user_id})
+            async for i in cursor:
+                indexes.append(fmt_index(i))
+            return indexes
+
+        # Wrap MongoDB fetch in a 4.0-second timeout to guarantee a response within 5 seconds
+        indexes = await asyncio.wait_for(fetch_indexes(), timeout=4.0)
+        latency = (time.time() - start_time) * 1000
+        logger.info(f"Successfully retrieved {len(indexes)} RAG indexes for user_id: {user_id} in {latency:.2f}ms")
+        return indexes
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout (4s) exceeded while fetching RAG indexes for user_id: {user_id}")
+        raise HTTPException(status_code=504, detail="Database query timed out. Please try again.")
+    except Exception as e:
+        logger.exception(f"Exception raised while listing RAG indexes for user_id: {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal database error: {str(e)}")
 
 
 @router.delete("/indexes/{index_id}")
