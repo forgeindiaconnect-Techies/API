@@ -384,11 +384,11 @@ def get_embedding_model(model_name: str = "paraphrase-MiniLM-L3-v2"):
         logger.warning("Low-memory environment detected (LOW_MEMORY_MODE or RENDER is active). Bypassing heavy SentenceTransformer to prevent OOM crashes. Falling back directly to HashingTFIDFEmbedder.")
         return HashingTFIDFEmbedder(384)
 
-    import os
     os.environ["ORT_LOGGING_LEVEL"] = "3"
     os.environ["ONNXRUNTIME_PROVIDERS"] = '["CPUExecutionProvider"]'
     os.environ["HF_HUB_HTTP_TIMEOUT"] = "15"
     os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
 
     max_attempts = 2
     for attempt in range(max_attempts):
