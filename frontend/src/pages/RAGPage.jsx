@@ -31,7 +31,10 @@ export default function RAGPage() {
       const { data } = await ragAPI.listIndexes()
       setIndexes(data)
       if (data.length > 0 && !selectedIndex) {
-        setSelectedIndex(data[0].id)
+        const readyIdx = data.find(idx => idx.status === 'ready')
+        if (readyIdx) {
+          setSelectedIndex(readyIdx.id)
+        }
       }
     } catch (err) {
       toast.error('Failed to load vector indexes')
@@ -53,10 +56,22 @@ export default function RAGPage() {
       try {
         const { data } = await ragAPI.listIndexes()
         setIndexes(data)
+        setSelectedIndex(prev => {
+          if (!prev) {
+            const readyIdx = data.find(idx => idx.status === 'ready')
+            return readyIdx ? readyIdx.id : null
+          }
+          const selected = data.find(idx => idx.id === prev)
+          if (selected && selected.status === 'ready') {
+            return prev
+          }
+          const readyIdx = data.find(idx => idx.status === 'ready')
+          return readyIdx ? readyIdx.id : null
+        })
       } catch (err) {
         console.error('Failed to poll index status', err)
       }
-    }, 2000)
+    }, 5000)
 
     return () => clearInterval(interval)
   }, [indexes])
@@ -248,12 +263,13 @@ export default function RAGPage() {
             <p className="section-title">Vector Indexes</p>
             {indexes.map((idx) => {
               const isActive = selectedIndex === idx.id
+              const isReady = idx.status === 'ready'
               const isBuilding = idx.status === 'building'
               return (
                 <div
                   key={idx.id}
-                  onClick={() => !isBuilding && setSelectedIndex(idx.id)}
-                  className={`w-full group flex items-start justify-between p-3 rounded-xl transition-all cursor-pointer ${isActive ? 'bg-[var(--accent-muted)] border-[var(--accent-primary)]' : 'bg-[var(--bg-secondary)] border-[var(--border)]'}`}
+                  onClick={() => isReady && setSelectedIndex(idx.id)}
+                  className={`w-full group flex items-start justify-between p-3 rounded-xl transition-all ${isReady ? 'cursor-pointer' : 'cursor-not-allowed opacity-75'} ${isActive ? 'bg-[var(--accent-muted)] border-[var(--accent-primary)]' : 'bg-[var(--bg-secondary)] border-[var(--border)]'}`}
                   style={{ border: '1px solid' }}
                 >
                   <div className="min-w-0 mr-2">
@@ -264,8 +280,12 @@ export default function RAGPage() {
                       </span>
                     </div>
                     {isBuilding ? (
-                      <span className="text-[10px] text-yellow-400 flex items-center gap-1">
-                        <Loader size={10} className="animate-spin" /> Building...
+                      <span className="text-[10px] text-yellow-400 flex items-center gap-1 font-medium">
+                        <Loader size={10} className="animate-spin" /> Building ({Math.round(idx.progress || 10)}%)...
+                      </span>
+                    ) : idx.status === 'failed' ? (
+                      <span className="text-[10px] text-red-400 flex items-center gap-1 font-medium" title={idx.error || 'Indexing failed'}>
+                        <AlertCircle size={10} /> Failed: {idx.error || 'Indexing failed'}
                       </span>
                     ) : (
                       <>

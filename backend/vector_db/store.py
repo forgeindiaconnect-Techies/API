@@ -378,6 +378,12 @@ def get_embedding_model(model_name: str = "paraphrase-MiniLM-L3-v2"):
     if _shared_embedding_model is not None:
         return _shared_embedding_model
 
+    # Check if we should bypass SentenceTransformer to prevent OOM
+    low_memory = os.environ.get("LOW_MEMORY_MODE", "").lower() == "true" or os.environ.get("RENDER", "").lower() == "true"
+    if low_memory:
+        logger.warning("Low-memory environment detected (LOW_MEMORY_MODE or RENDER is active). Bypassing heavy SentenceTransformer to prevent OOM crashes. Falling back directly to HashingTFIDFEmbedder.")
+        return HashingTFIDFEmbedder(384)
+
     import os
     os.environ["ORT_LOGGING_LEVEL"] = "3"
     os.environ["ONNXRUNTIME_PROVIDERS"] = '["CPUExecutionProvider"]'

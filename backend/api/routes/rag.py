@@ -20,9 +20,12 @@ def fmt_index(i: dict) -> dict:
         "embedding_model": i.get("embedding_model", ""),
         "chunk_count": i.get("chunk_count", 0),
         "status": i.get("status", "building"),
+        "progress": i.get("progress", 0.0),
+        "error": i.get("error"),
         "user_id": i.get("user_id", ""),
         "created_at": i.get("created_at", datetime.utcnow()),
     }
+
 
 
 @router.post("/index")

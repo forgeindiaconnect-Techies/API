@@ -146,7 +146,7 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         index_type = index_doc.get("index_type", "chroma")
         await db.rag_indexes.update_one(
             {"_id": index_doc["_id"]},
-            {"$set": {"status": "building", "error": None}}
+            {"$set": {"status": "building", "progress": 10.0, "error": None}}
         )
     else:
         index_type = "chroma"
@@ -159,6 +159,7 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             "index_type": index_type,
             "chunk_count": 0,
             "status": "building",
+            "progress": 10.0,
             "user_id": dataset_doc.get("user_id", ""),
             "created_at": datetime.utcnow(),
         }
@@ -175,12 +176,22 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         meta_res = await asyncio.to_thread(_process_sync, temp_path, file_type)
         logger.info("Dataset loaded")
         
+        await db.rag_indexes.update_one(
+            {"_id": index_id},
+            {"$set": {"progress": 30.0}}
+        )
+        
         # 4. Extract text
         chunks = await extract_text_from_file(temp_path, file_type)
         
         if not chunks:
             raise Exception("No text content could be extracted from this dataset.")
         logger.info("Chunks created")
+        
+        await db.rag_indexes.update_one(
+            {"_id": index_id},
+            {"$set": {"progress": 50.0}}
+        )
             
         # 5. Generate embeddings & Store in VectorStore
         embedder = await get_embedding_model_async("paraphrase-MiniLM-L3-v2")
@@ -197,6 +208,11 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
                 batch_embeds = batch_embeds.tolist()
             embeddings.extend(batch_embeds)
         logger.info("Embeddings generated")
+        
+        await db.rag_indexes.update_one(
+            {"_id": index_id},
+            {"$set": {"progress": 75.0}}
+        )
             
         store = VectorStore(backend=index_type, collection_name=index_id)
         metadatas = []
@@ -210,11 +226,16 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         ids = [f"{index_id}_{idx}" for idx in range(len(chunks))]
         
         await store.add_documents(chunks, embeddings, metadatas, ids)
-        logger.info("Vectors inserted")
+        logger.info("Documents stored in ChromaDB")
         
         # Log collection count
         col_count = await store.count()
         logger.info(f"Collection count: {col_count}")
+        
+        await db.rag_indexes.update_one(
+            {"_id": index_id},
+            {"$set": {"progress": 90.0}}
+        )
 
         # Precompute EDA and preview so they don't block requests or cause timeouts on load
         from datasets.processor import _eda_sync
@@ -238,10 +259,10 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         )
         
         await db.rag_indexes.update_one(
-            {"_id": index_doc["_id"] if index_doc else res.inserted_id},
-            {"$set": {"status": "ready", "chunk_count": len(chunks), "error": None}}
+            {"_id": index_id},
+            {"$set": {"status": "ready", "progress": 100.0, "chunk_count": len(chunks), "error": None}}
         )
-        logger.info("Index marked ready")
+        logger.info("Index status updated to READY")
         logger.info(f"Successfully indexed dataset {dataset_id} with {len(chunks)} chunks using {index_type}.")
         return index_id
     except Exception as e:
@@ -251,8 +272,8 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             {"$set": {"status": "failed", "error_message": str(e)}}
         )
         await db.rag_indexes.update_one(
-            {"_id": index_doc["_id"] if index_doc else res.inserted_id},
-            {"$set": {"status": "failed", "error": str(e)}}
+            {"_id": index_id},
+            {"$set": {"status": "failed", "progress": 0.0, "error": str(e)}}
         )
         raise
     finally:
