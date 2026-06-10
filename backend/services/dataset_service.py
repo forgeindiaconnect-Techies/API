@@ -133,6 +133,13 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
     file_name = dataset_doc.get("file_name") or dataset_doc.get("name", "unknown")
     file_type = dataset_doc.get("file_type") or file_name.split(".")[-1].lower()
     
+    # Check if dataset still exists in MongoDB before starting
+    exists = await db.datasets.find_one({"_id": dataset_doc["_id"]})
+    if not exists:
+        logger.warning(f"Aborting indexing: dataset {dataset_id} was deleted by the user")
+        await db.rag_indexes.delete_many({"dataset_id": dataset_id})
+        return ""
+
     # 1. Update status to processing in DB
     await db.datasets.update_one(
         {"_id": dataset_doc["_id"]},
@@ -213,7 +220,18 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             {"_id": index_id},
             {"$set": {"progress": 75.0}}
         )
-            
+        # Verify dataset still exists before populating vector store
+        exists = await db.datasets.find_one({"_id": dataset_doc["_id"]})
+        if not exists:
+            logger.warning(f"Aborting indexing: dataset {dataset_id} was deleted by the user during embedding generation")
+            await db.rag_indexes.delete_many({"dataset_id": dataset_id})
+            try:
+                store = VectorStore(backend=index_type, collection_name=index_id)
+                await store.delete_store()
+            except Exception:
+                pass
+            return ""
+
         store = VectorStore(backend=index_type, collection_name=index_id)
         metadatas = []
         for idx, chunk in enumerate(chunks):

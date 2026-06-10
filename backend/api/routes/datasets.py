@@ -243,8 +243,52 @@ async def get_dataset(dataset_id: str, current_user=Depends(get_current_user)):
 @router.delete("/{dataset_id}")
 async def delete_dataset(dataset_id: str, current_user=Depends(get_current_user)):
     d = await fetch_user_dataset_or_raise(dataset_id, current_user)
+    db = get_db()
+    if db is None:
+        logger.error("Database connection wrapper is None")
+        raise HTTPException(status_code=500, detail="Database connection unavailable")
 
-    # Delete from Cloudinary
+    dataset_id_str = str(d["_id"])
+
+    # 1. Clean up associated RAG indexes and vector stores (ChromaDB/FAISS)
+    try:
+        from vector_db.store import VectorStore
+        # Find all RAG indexes for this dataset
+        async for idx in db.rag_indexes.find({"dataset_id": dataset_id_str}):
+            index_id = str(idx["_id"])
+            index_type = idx.get("index_type", "chroma")
+            logger.info(f"Cleaning up vector store collection for RAG index {index_id} of type {index_type}")
+            try:
+                store = VectorStore(backend=index_type, collection_name=index_id)
+                await store.delete_store()
+            except Exception as ve:
+                logger.error(f"Failed to delete vector store '{index_id}': {ve}")
+
+        # Delete all RAG index documents from MongoDB
+        del_indexes_res = await db.rag_indexes.delete_many({"dataset_id": dataset_id_str})
+        logger.info(f"Deleted {del_indexes_res.deleted_count} RAG index documents from MongoDB for dataset {dataset_id_str}")
+    except Exception as ie:
+        logger.error(f"Error occurred during RAG index/vector store cleanup for dataset {dataset_id_str}: {ie}")
+
+    # 2. Delete raw local file from disk
+    local_path = d.get("file_path")
+    if local_path:
+        try:
+            paths_to_try = [
+                local_path,
+                os.path.abspath(local_path),
+                os.path.abspath(os.path.join(os.path.dirname(__file__), "..", local_path)),
+                os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", local_path))
+            ]
+            for p in paths_to_try:
+                if os.path.exists(p) and os.path.isfile(p):
+                    os.remove(p)
+                    logger.info(f"Deleted local file at: {p}")
+                    break
+        except Exception as fe:
+            logger.error(f"Failed to delete local file '{local_path}': {fe}")
+
+    # 3. Delete from Cloudinary
     public_id = d.get("public_id")
     if public_id:
         try:
@@ -256,13 +300,10 @@ async def delete_dataset(dataset_id: str, current_user=Depends(get_current_user)
         except Exception as e:
             logger.error(f"Failed to delete Cloudinary file {public_id}: {e}")
 
-    db = get_db()
-    if db is None:
-        logger.error("Database connection wrapper is None")
-        raise HTTPException(status_code=500, detail="Database connection unavailable")
-    
+    # 4. Delete the dataset document from MongoDB
     await db.datasets.delete_one({"_id": d["_id"]})
-    return {"message": "Dataset deleted"}
+    logger.info(f"Successfully deleted dataset document {dataset_id_str} from db.datasets")
+    return {"message": "Dataset and all associated indexes/files deleted successfully"}
 
 
 def _generate_preview(temp_path: str, ext: str, rows: int = 20) -> dict:

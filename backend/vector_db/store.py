@@ -243,6 +243,34 @@ class VectorStore:
                 self._collection.delete(ids=ids)
             await run_with_retry_async(op)
 
+    async def delete_store(self):
+        await self.ensure_initialized()
+        if self.backend == "chroma" and self._client:
+            from services.chroma_service import run_with_retry_async
+            def op():
+                try:
+                    self._client.delete_collection(self.collection_name)
+                    logger.info(f"Deleted ChromaDB collection '{self.collection_name}'")
+                except Exception as ce:
+                    # Ignore if the collection was already deleted or doesn't exist
+                    err_msg = str(ce).lower()
+                    if "does not exist" in err_msg or "not found" in err_msg:
+                        logger.info(f"ChromaDB collection '{self.collection_name}' already deleted or not found")
+                    else:
+                        logger.error(f"Failed to delete ChromaDB collection '{self.collection_name}': {ce}")
+                        raise
+            await run_with_retry_async(op)
+        elif self.backend == "faiss":
+            try:
+                if hasattr(self, "_index_path") and os.path.exists(self._index_path):
+                    os.remove(self._index_path)
+                    logger.info(f"Deleted FAISS index file: {self._index_path}")
+                if hasattr(self, "_docs_path") and os.path.exists(self._docs_path):
+                    os.remove(self._docs_path)
+                    logger.info(f"Deleted FAISS docs file: {self._docs_path}")
+            except Exception as e:
+                logger.error(f"Failed to delete FAISS store files for '{self.collection_name}': {e}")
+
     async def count(self) -> int:
         await self.ensure_initialized()
         if self.backend == "chroma" and self._collection:
