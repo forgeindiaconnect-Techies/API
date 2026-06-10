@@ -40,7 +40,8 @@ torch==2.0.1+cpu
 # Only RecursiveCharacterTextSplitter is used — the lightweight text-splitters
 # package replaces the full langchain/langchain-community/langchain-core stack.
 langchain-text-splitters>=0.2.0,<0.4.0
-chromadb>=0.5.0,<0.6.0
+chromadb==1.5.9
+posthog>=2.4.0,<3.0.0
 
 # ─── LLM Training ────────────────────────────────────────────────────────────
 datasets>=2.16.0,<3.0.0

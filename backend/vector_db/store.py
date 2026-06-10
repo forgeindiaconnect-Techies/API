@@ -6,6 +6,9 @@ import logging
 import os
 import asyncio
 
+# Disable ChromaDB telemetry globally
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
+
 from config import settings
 
 logger = logging.getLogger(__name__)
