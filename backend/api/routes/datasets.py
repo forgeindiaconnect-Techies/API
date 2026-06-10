@@ -355,6 +355,7 @@ def _generate_preview(temp_path: str, ext: str, rows: int = 20) -> dict:
 @router.post("/{dataset_id}/process")
 async def reprocess_dataset(
     dataset_id: str,
+    background_tasks: BackgroundTasks,
     options: Optional[ProcessingOptions] = None,
     current_user=Depends(get_current_user),
 ):
@@ -366,55 +367,61 @@ async def reprocess_dataset(
         
     await db.datasets.update_one({"_id": d["_id"]}, {"$set": {"status": "processing", "error_message": None}})
     
-    temp_path = None
-    is_temp = False
-    try:
-        from services.dataset_service import get_dataset_file
-        from datasets.processor import _process_sync, _eda_sync
-        
-        # 1. Download/get dataset file
-        temp_path, is_temp = await get_dataset_file(d)
-        
-        # 2. Extract metadata, EDA, and preview
-        meta_res = await asyncio.to_thread(_process_sync, temp_path, d.get("file_type", ""))
-        eda_res = await asyncio.to_thread(_eda_sync, temp_path, d.get("file_type", ""))
-        preview_res = await asyncio.to_thread(_generate_preview, temp_path, d.get("file_type", ""))
-        
-        # 3. Update MongoDB with completed status and all fields
-        rows = meta_res.get("rows")
-        cols = meta_res.get("cols")
-        columns = meta_res.get("columns", [])
-        
-        update_doc = {
-            "status": "completed",
-            "rows": rows,
-            "cols": cols,
-            "row_count": rows,
-            "columns": columns,
-            "stats": eda_res,
-            "preview": preview_res,
-            "processed_at": datetime.utcnow(),
-            "error_message": None
-        }
-        
-        await db.datasets.update_one({"_id": d["_id"]}, {"$set": update_doc})
-        
-        updated_d = await db.datasets.find_one({"_id": d["_id"]})
-        return fmt_dataset(updated_d)
-        
-    except Exception as e:
-        logger.error(f"Processing failed for dataset {dataset_id}: {e}", exc_info=True)
-        await db.datasets.update_one(
-            {"_id": d["_id"]},
-            {"$set": {"status": "failed", "error_message": str(e)}}
-        )
-        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
-    finally:
-        if temp_path and is_temp and os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except Exception as clean_err:
-                logger.error(f"Failed to remove temp file {temp_path}: {clean_err}")
+    async def do_reprocess_bg(dataset_doc: dict):
+        temp_path = None
+        is_temp = False
+        try:
+            from services.dataset_service import get_dataset_file
+            from datasets.processor import _process_sync, _eda_sync
+            
+            # 1. Download/get dataset file
+            temp_path, is_temp = await get_dataset_file(dataset_doc)
+            
+            # 2. Extract metadata, EDA, and preview
+            meta_res = await asyncio.to_thread(_process_sync, temp_path, dataset_doc.get("file_type", ""))
+            eda_res = await asyncio.to_thread(_eda_sync, temp_path, dataset_doc.get("file_type", ""))
+            preview_res = await asyncio.to_thread(_generate_preview, temp_path, dataset_doc.get("file_type", ""))
+            
+            # 3. Update MongoDB with completed status and all fields
+            rows = meta_res.get("rows")
+            cols = meta_res.get("cols")
+            columns = meta_res.get("columns", [])
+            
+            update_doc = {
+                "status": "completed",
+                "rows": rows,
+                "cols": cols,
+                "row_count": rows,
+                "columns": columns,
+                "stats": eda_res,
+                "preview": preview_res,
+                "processed_at": datetime.utcnow(),
+                "error_message": None
+            }
+            
+            db_instance = get_db()
+            await db_instance.datasets.update_one({"_id": ObjectId(dataset_doc["_id"])}, {"$set": update_doc})
+            logger.info(f"Reprocessing completed successfully for dataset {dataset_doc['_id']}")
+        except Exception as e:
+            logger.error(f"Reprocessing background task failed for dataset {dataset_doc['_id']}: {e}", exc_info=True)
+            db_instance = get_db()
+            await db_instance.datasets.update_one(
+                {"_id": ObjectId(dataset_doc["_id"])},
+                {"$set": {"status": "failed", "error_message": str(e)}}
+            )
+        finally:
+            if temp_path and is_temp and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception as clean_err:
+                    logger.error(f"Failed to remove temp file {temp_path}: {clean_err}")
+
+    background_tasks.add_task(do_reprocess_bg, d)
+    
+    # Return formatted info immediately with status 'processing'
+    d["status"] = "processing"
+    return fmt_dataset(d)
+
 
 
 @router.get("/{dataset_id}/status")

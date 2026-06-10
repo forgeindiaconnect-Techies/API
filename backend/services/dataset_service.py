@@ -215,6 +215,12 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         # Log collection count
         col_count = await store.count()
         logger.info(f"Collection count: {col_count}")
+
+        # Precompute EDA and preview so they don't block requests or cause timeouts on load
+        from datasets.processor import _eda_sync
+        from api.routes.datasets import _generate_preview
+        eda_res = await asyncio.to_thread(_eda_sync, temp_path, file_type)
+        preview_res = await asyncio.to_thread(_generate_preview, temp_path, file_type)
         
         # 6. Update status to indexed in DB
         await db.datasets.update_one(
@@ -225,6 +231,8 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
                 "cols": meta_res.get("cols"),
                 "columns": meta_res.get("columns", []),
                 "metadata": meta_res.get("metadata", {}),
+                "stats": eda_res,
+                "preview": preview_res,
                 "processed_at": datetime.utcnow()
             }}
         )
