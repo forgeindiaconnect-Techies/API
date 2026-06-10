@@ -1,4 +1,8 @@
 @echo off
+:: Suppress ONNX Runtime GPU device discovery warnings
+set ORT_LOGGING_LEVEL=3
+set ONNXRUNTIME_PROVIDERS=CPUExecutionProvider
+
 echo Starting Personal AI Studio...
 
 :: Backend

@@ -1,7 +1,7 @@
 import asyncio
 import logging
-import chromadb
 from config import settings
+import chromadb
 
 logger = logging.getLogger(__name__)
 

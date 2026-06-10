@@ -28,6 +28,8 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - OLLAMA_BASE_URL=http://ollama:11434 # Or set to your external GPU server URL: e.g., https://xxxx.proxy.runpod.net:11434
       - ALLOWED_ORIGINS=http://localhost:3000
+      - ORT_LOGGING_LEVEL=3
+      - ONNXRUNTIME_PROVIDERS=CPUExecutionProvider
     volumes:
       - ./backend/uploads:/app/uploads
       - ./backend/chroma_db:/app/chroma_db
@@ -48,6 +50,8 @@ services:
       - MONGODB_URL=mongodb://mongo:27017
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
+      - ORT_LOGGING_LEVEL=3
+      - ONNXRUNTIME_PROVIDERS=CPUExecutionProvider
     volumes:
       - ./backend/uploads:/app/uploads
     depends_on:

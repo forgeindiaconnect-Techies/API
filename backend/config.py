@@ -1,7 +1,12 @@
+import os
+
+# Set ONNX Runtime logging and provider environment variables early to suppress device discovery warnings
+os.environ["ORT_LOGGING_LEVEL"] = "3"
+os.environ["ONNXRUNTIME_PROVIDERS"] = '["CPUExecutionProvider"]'
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, AliasChoices, field_validator
 from typing import List, Optional
-import os
 from dotenv import load_dotenv
 
 # Load environment variables from .env

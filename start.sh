@@ -3,6 +3,10 @@
 
 set -e
 
+# Suppress ONNX Runtime GPU device discovery warnings
+export ORT_LOGGING_LEVEL=3
+export ONNXRUNTIME_PROVIDERS=CPUExecutionProvider
+
 echo "🚀 Starting Personal AI Studio..."
 
 # ─── Check dependencies ───────────────────────────────────────────────────────
