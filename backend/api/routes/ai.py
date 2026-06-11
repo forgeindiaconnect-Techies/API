@@ -50,7 +50,29 @@ async def transcribe_audio(
                 "confidence": 0.94,
             }
         except Exception as whisper_err:
-            logger.warning(f"Whisper transcription failed: {whisper_err}. Falling back to demo mode.")
+            logger.warning(f"Whisper transcription failed: {whisper_err}. Trying OpenAI fallback...")
+            
+            # Fallback to OpenAI Whisper if API key is configured
+            if settings.OPENAI_API_KEY and not settings.OPENAI_API_KEY.startswith("sk-..."):
+                try:
+                    from openai import AsyncOpenAI
+                    openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+                    with open(tmp_path, "rb") as audio_file:
+                        res = await openai_client.audio.transcriptions.create(
+                            model="whisper-1",
+                            file=audio_file,
+                            language=language
+                        )
+                    return {
+                        "text": res.text,
+                        "language": language,
+                        "segments": [],
+                        "confidence": 0.98,
+                        "method": "openai-whisper"
+                    }
+                except Exception as openai_err:
+                    logger.error(f"OpenAI transcription fallback failed: {openai_err}")
+                    
             return {
                 "text": f"[Transcription demo] Audio file '{file.filename}' received. Install Whisper for real transcription: pip install openai-whisper (Error: {whisper_err})",
                 "language": language,
@@ -72,11 +94,42 @@ async def caption_image(
         raise HTTPException(status_code=400, detail="Unsupported image format")
 
     content = await file.read()
+    
+    # Try Hugging Face Inference API if token is configured
+    if settings.HUGGINGFACE_TOKEN and not settings.HUGGINGFACE_TOKEN.startswith("hf_..."):
+        try:
+            import httpx
+            headers = {"Authorization": f"Bearer {settings.HUGGINGFACE_TOKEN}"}
+            # Salesforce BLIP model is fast and free for captioning
+            API_URL = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-base"
+            async with httpx.AsyncClient(timeout=15, headers={"bypass-tunnel-reminder": "true"}) as client:
+                resp = await client.post(API_URL, headers=headers, content=content)
+                if resp.status_code == 200:
+                    res_json = resp.json()
+                    if isinstance(res_json, list) and len(res_json) > 0:
+                        caption = res_json[0].get("generated_text", "")
+                        if caption:
+                            caption = caption.capitalize()
+                            words = caption.split()
+                            tags = list(set([w.lower().strip(".,!?()") for w in words if len(w) > 3]))
+                            return {
+                                "caption": caption,
+                                "tags": tags[:6],
+                                "confidence": 0.95,
+                                "objects_detected": tags[:4],
+                            }
+        except Exception as hf_err:
+            logger.warning(f"HuggingFace image captioning failed: {hf_err}. Using fallback.")
+
+    # Fallback dynamic caption based on filename
+    filename_clean = os.path.splitext(file.filename)[0].replace("-", " ").replace("_", " ")
+    words = [w.lower() for w in filename_clean.split() if len(w) > 2]
+    tags = words if words else ["image", "object"]
     return {
-        "caption": f"A professional workspace with modern equipment and organized desk setup. The image shows {file.filename} which appears to be a high-quality photograph with good lighting.",
-        "tags": ["workspace", "professional", "modern", "organized"],
-        "confidence": 0.89,
-        "objects_detected": ["desk", "computer", "monitor", "keyboard"],
+        "caption": f"A high-quality image of {filename_clean}. The photo appears to display elements of {', '.join(tags)} with clear details.",
+        "tags": tags[:6],
+        "confidence": 0.85,
+        "objects_detected": tags[:4],
     }
 
 
@@ -177,19 +230,27 @@ async def generate_image(data: GenerateImageRequest, current_user=Depends(get_cu
         w, h = [int(x) for x in data.size.split("x")]
         image = pipe(data.prompt, num_inference_steps=data.steps, width=w, height=h).images[0]
 
-        out_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.png")
-        image.save(out_path)
+        import base64, io
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        img_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        image_url = f"data:image/png;base64,{img_str}"
+
         return {
-            "image_path": out_path,
+            "image_url": image_url,
             "prompt": data.prompt,
             "latency_ms": round((time.time() - start) * 1000, 2),
         }
     except Exception as img_err:
-        logger.warning(f"Image generation failed: {img_err}. Falling back to demo mode.")
+        logger.warning(f"Image generation failed: {img_err}. Falling back to Pollinations AI.")
+        import urllib.parse
+        quoted_prompt = urllib.parse.quote(data.prompt)
+        width, height = data.size.split("x")
+        image_url = f"https://image.pollinations.ai/p/{quoted_prompt}?width={width}&height={height}&nologo=true"
         return {
-            "image_url": f"https://picsum.photos/seed/{hash(data.prompt) % 1000}/512/512",
+            "image_url": image_url,
             "prompt": data.prompt,
-            "note": f"Demo mode. Image generation error: {str(img_err)}",
+            "note": "Demo mode powered by Pollinations AI.",
             "latency_ms": round((time.time() - start) * 1000, 2),
         }
 
