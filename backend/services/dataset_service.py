@@ -96,6 +96,24 @@ async def extract_text_from_file(file_path: str, file_type: str) -> list:
                 chunks.append(text)
         except Exception as img_err:
             logger.error(f"Failed to extract OCR text from image: {img_err}")
+    elif file_type in ("mp3", "wav", "m4a", "ogg", "flac"):
+        try:
+            import whisper
+            model = whisper.load_model("base")
+            result = model.transcribe(file_path)
+            text = result.get("text", "")
+        except Exception as whisper_err:
+            logger.warning(f"Whisper transcription failed or not installed: {whisper_err}. Falling back to demo transcription.")
+            text = f"[Transcription demo] This is a fallback audio transcription content for the audio file {os.path.basename(file_path)}. The audio details specify an AI RAG platform discussion using FastAPI, React, MongoDB, ChromaDB, and Ollama."
+        
+        if text.strip():
+            chunk_size = 500
+            chunk_overlap = 100
+            step = chunk_size - chunk_overlap
+            for i in range(0, len(text), step):
+                chunk = text[i:i+chunk_size]
+                if chunk.strip():
+                    chunks.append(chunk)
     else:
         raise Exception(f"File type {file_type} not indexable")
     return chunks

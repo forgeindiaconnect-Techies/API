@@ -210,7 +210,7 @@ async def stream_message(
                 sources = []
             else:
                 from services.chat_service import query_dataset_rag
-                rag_res = await query_dataset_rag(index_id, data.content, top_k=3, db=db)
+                rag_res = await query_dataset_rag(index_id, data.content, top_k=3, db=db, model=data.model)
                 answer_content = rag_res["answer"]
                 sources = rag_res.get("sources", [])
 

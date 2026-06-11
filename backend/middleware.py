@@ -208,6 +208,13 @@ class AuthMiddleware:
                         await response(scope, receive, send)
                         return
 
+                # Check rate limit
+                if key_doc.get("requests_count", 0) >= key_doc.get("rate_limit", 1000):
+                    logger.warning("AuthMiddleware: API Key rate limit exceeded")
+                    response = self._cors_response(origin, 429, {"detail": "Rate limit exceeded for this API key"})
+                    await response(scope, receive, send)
+                    return
+
                 user_id = key_doc.get("user_id")
                 # Update metrics
                 now_utc = datetime.now(timezone.utc)

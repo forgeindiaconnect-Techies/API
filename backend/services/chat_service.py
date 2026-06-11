@@ -59,7 +59,7 @@ def generate_fallback_answer(question: str, valid_sources: list) -> str:
     return f"According to the dataset, {joined_text}"
 
 
-async def query_dataset_rag(index_id: str, question: str, top_k: int = 5, db = None) -> dict:
+async def query_dataset_rag(index_id: str, question: str, top_k: int = 5, db = None, model: str = None) -> dict:
     """
     Retrieve matching context chunks from vector DB (Chroma/FAISS) and answer the user question.
     Falls back to a smart local context matcher if Ollama/OpenAI is offline.
@@ -198,7 +198,7 @@ Generate a natural language response."""
                 timeout=1.5  # Fast 1.5 seconds connection timeout
             )
             res = await client.generate(
-                model=settings.DEFAULT_MODEL or "llama3",
+                model=model or settings.DEFAULT_MODEL or "llama3",
                 prompt=prompt,
                 stream=False
             )

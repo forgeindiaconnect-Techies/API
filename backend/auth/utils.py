@@ -163,6 +163,14 @@ async def get_current_user(
                         headers={"WWW-Authenticate": "Bearer"},
                     )
 
+            # Check rate limit
+            if key_doc.get("requests_count", 0) >= key_doc.get("rate_limit", 1000):
+                logger.warning("get_current_user: API Key rate limit exceeded")
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Rate limit exceeded for this API key"
+                )
+
             user_id = key_doc.get("user_id")
             # Update metrics
             now_utc = datetime.now(timezone.utc)

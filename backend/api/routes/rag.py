@@ -132,7 +132,7 @@ async def rag_chat(data: RAGChatRequest, current_user=Depends(get_current_user))
         raise HTTPException(status_code=404, detail="Index not found")
 
     from services.chat_service import query_dataset_rag
-    rag_res = await query_dataset_rag(data.index_id, data.question, data.top_k, db)
+    rag_res = await query_dataset_rag(data.index_id, data.question, data.top_k, db, model=data.model)
 
     return {
         "answer": rag_res["answer"],
