@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from datetime import datetime, timedelta
 from auth.utils import get_current_user
 from database import get_db
+import asyncio
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
@@ -10,56 +11,62 @@ router = APIRouter(prefix="/analytics", tags=["Analytics"])
 async def get_dashboard(current_user=Depends(get_current_user)):
     db = get_db()
     user_id = str(current_user["_id"])
-
-    # Count resources
-    dataset_count = await db.datasets.count_documents({"user_id": user_id})
-    model_count = await db.models.count_documents({"user_id": user_id})
-    api_key_count = await db.api_keys.count_documents({
-        "user_id": user_id,
-        "$or": [
-            {"is_active": True},
-            {"is_active": {"$exists": False}, "status": "active"}
-        ]
-    })
-    conv_count = await db.conversations.count_documents({"user_id": user_id})
-
-    # Fast all-time stats calculation
-    total_requests = await db.messages.count_documents({"user_id": user_id, "role": "user"})
-    total_tokens = 0
-
     now = datetime.utcnow()
+
     one_day_ago = now - timedelta(days=1)
     seven_days_ago = now - timedelta(days=7)
     fourteen_days_ago = now - timedelta(days=14)
 
-    # All-time tokens aggregate sum
-    if hasattr(db.messages._collection, "aggregate"):
-        try:
-            pipeline_all = [
-                {"$match": {"user_id": user_id, "role": "user"}},
-                {"$group": {
-                    "_id": None,
-                    "total_tokens": {
-                        "$sum": {
-                            "$ifNull": [
-                                "$tokens_used",
-                                {"$max": [1, {"$floor": {"$divide": [{"$strLenCP": {"$ifNull": ["$content", ""]}}, 4]}}]}
-                            ]
+    # Helper task for tokens aggregation
+    async def get_total_tokens():
+        if hasattr(db.messages._collection, "aggregate"):
+            try:
+                pipeline_all = [
+                    {"$match": {"user_id": user_id, "role": "user"}},
+                    {"$group": {
+                        "_id": None,
+                        "total_tokens": {
+                            "$sum": {
+                                "$ifNull": [
+                                    "$tokens_used",
+                                    {"$max": [1, {"$floor": {"$divide": [{"$strLenCP": {"$ifNull": ["$content", ""]}}, 4]}}]}
+                                ]
+                            }
                         }
-                    }
-                }}
-            ]
-            cursor = db.messages.aggregate(pipeline_all)
-            res = await cursor.to_list(1)
-            if res:
-                total_tokens = res[0].get("total_tokens", 0)
-        except Exception as ae:
-            import logging
-            logging.getLogger(__name__).warning(f"All-time tokens aggregation failed: {ae}")
-    else:
-        # Fallback for MockDB
-        async for msg in db.messages.find({"user_id": user_id, "role": "user"}):
-            total_tokens += msg.get("tokens_used") or max(1, len(msg.get("content", "")) // 4)
+                    }}
+                ]
+                cursor = db.messages.aggregate(pipeline_all)
+                res = await cursor.to_list(1)
+                if res:
+                    return res[0].get("total_tokens", 0)
+            except Exception as ae:
+                import logging
+                logging.getLogger(__name__).warning(f"All-time tokens aggregation failed: {ae}")
+        else:
+            # Fallback for MockDB
+            total = 0
+            async for msg in db.messages.find({"user_id": user_id, "role": "user"}):
+                total += msg.get("tokens_used") or max(1, len(msg.get("content", "")) // 4)
+            return total
+        return 0
+
+    # Fetch counts and total tokens concurrently in parallel
+    (dataset_count, model_count, api_key_count, conv_count, total_requests), total_tokens = await asyncio.gather(
+        asyncio.gather(
+            db.datasets.count_documents({"user_id": user_id}),
+            db.models.count_documents({"user_id": user_id}),
+            db.api_keys.count_documents({
+                "user_id": user_id,
+                "$or": [
+                    {"is_active": True},
+                    {"is_active": {"$exists": False}, "status": "active"}
+                ]
+            }),
+            db.conversations.count_documents({"user_id": user_id}),
+            db.messages.count_documents({"user_id": user_id, "role": "user"})
+        ),
+        get_total_tokens()
+    )
 
     # Binned stats for the last 14 days (optimized query)
     requests_today = 0
