@@ -55,6 +55,7 @@ export default function MultimodalPage() {
   const [result, setResult] = useState('')
   const [loading, setLoading] = useState(false)
   const [prompt, setPrompt] = useState('')
+  const [searchData, setSearchData] = useState(null)
 
   const currentMode = MODES.find(m => m.id === mode)
 
@@ -80,6 +81,7 @@ export default function MultimodalPage() {
 
     setLoading(true)
     setResult('')
+    setSearchData(null)
 
     try {
       if (mode === 'generate') {
@@ -89,6 +91,7 @@ export default function MultimodalPage() {
           size: '512x512',
         })
         setResult(data.image_url || data.image_path)
+        setSearchData(data.search_data)
       } else {
         const formData = new FormData()
         formData.append('file', file)
@@ -131,7 +134,7 @@ export default function MultimodalPage() {
       {/* Mode Selector */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {MODES.map(({ id, label, icon: Icon, desc }) => (
-          <button key={id} onClick={() => { setMode(id); setFile(null); setPreview(null); setResult('') }}
+          <button key={id} onClick={() => { setMode(id); setFile(null); setPreview(null); setResult(''); setSearchData(null) }}
             className="p-4 rounded-xl text-left transition-all"
             style={{
               background: mode === id ? 'var(--accent-muted)' : 'var(--bg-secondary)',
@@ -249,11 +252,45 @@ export default function MultimodalPage() {
                 <p className="text-sm" style={{ color: 'var(--text-muted)' }}>Processing with AI...</p>
               </div>
             ) : mode === 'generate' && result ? (
-              <div className="space-y-3">
-                <img src={result} alt="generated" className="w-full rounded-lg" />
+              <div className="space-y-4">
+                <img src={result} alt="generated" className="w-full rounded-lg shadow-md" />
                 <button className="btn-ghost w-full justify-center text-xs">
                   <Download size={12} /> Download
                 </button>
+
+                {searchData && (
+                  <div className="mt-4 p-4 rounded-xl space-y-3 text-left" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border)' }}>
+                    <div className="flex items-center justify-between border-b pb-2 mb-2" style={{ borderColor: 'var(--border)' }}>
+                      <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--accent-primary)' }}>
+                        {searchData.source || 'Search Information'}
+                      </p>
+                      <a href={searchData.url || `https://www.google.com/search?q=${encodeURIComponent(prompt)}`}
+                         target="_blank" rel="noopener noreferrer" className="text-xs font-medium hover:underline" style={{ color: 'var(--accent-primary)' }}>
+                        Search Google &rarr;
+                      </a>
+                    </div>
+                    
+                    {searchData.description && (
+                      <p className="text-sm leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+                        {searchData.description}
+                      </p>
+                    )}
+                    
+                    {searchData.results && (
+                      <div className="space-y-3 mt-2">
+                        {searchData.results.map((item, idx) => (
+                          <div key={idx} className="space-y-1">
+                            <a href={item.url} target="_blank" rel="noopener noreferrer" 
+                               className="text-sm font-semibold hover:underline block" style={{ color: 'var(--text-primary)' }}>
+                              {item.title}
+                            </a>
+                            <p className="text-xs leading-normal" style={{ color: 'var(--text-muted)' }}>{item.snippet}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             ) : (
               <pre className="text-xs leading-relaxed whitespace-pre-wrap font-mono overflow-auto"

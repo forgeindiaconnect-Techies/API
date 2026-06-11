@@ -21,6 +21,84 @@ class GenerateImageRequest(BaseModel):
     steps: int = 20
 
 
+async def get_google_data(query: str) -> dict:
+    import urllib.parse
+    import httpx
+    import re
+    
+    # Try DuckDuckGo Instant Answer API first
+    try:
+        quoted = urllib.parse.quote(query)
+        async with httpx.AsyncClient(timeout=5, headers={"User-Agent": "Mozilla/5.0", "bypass-tunnel-reminder": "true"}) as client:
+            resp = await client.get(f"https://api.duckduckgo.com/?q={quoted}&format=json&no_html=1")
+            if resp.status_code == 200:
+                data = resp.json()
+                abstract = data.get("Abstract", "")
+                source = data.get("AbstractSource", "")
+                url = data.get("AbstractURL", "")
+                if abstract:
+                    return {
+                        "title": f"Summary: {query}",
+                        "description": abstract,
+                        "url": url,
+                        "source": source or "DuckDuckGo Summary"
+                    }
+    except Exception as e:
+        logger.warning(f"DuckDuckGo API search failed: {e}")
+
+    # Fallback to DuckDuckGo HTML search scraping
+    try:
+        quoted = urllib.parse.quote(query)
+        url = f"https://html.duckduckgo.com/html/?q={quoted}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124"
+        }
+        async with httpx.AsyncClient(timeout=5, headers=headers) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                html = resp.text
+                links = re.findall(r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html, re.DOTALL)
+                snippets = re.findall(r'<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>', html, re.DOTALL)
+                
+                import html as html_lib
+                results = []
+                for i in range(min(len(links), len(snippets))):
+                    href = links[i][0]
+                    # Filter out search advertisement links
+                    if "y.js?" in href or "ad_provider" in href:
+                        continue
+                        
+                    if "uddg=" in href:
+                        href = urllib.parse.unquote(href.split("uddg=")[1].split("&")[0])
+                    
+                    title_clean = re.sub(r'<[^>]+>', '', links[i][1]).strip()
+                    snippet_clean = re.sub(r'<[^>]+>', '', snippets[i]).strip()
+                    
+                    results.append({
+                        "title": html_lib.unescape(title_clean),
+                        "url": href,
+                        "snippet": html_lib.unescape(snippet_clean)
+                    })
+                    if len(results) >= 3:
+                        break
+                if results:
+                    return {
+                        "title": f"Web results for '{query}'",
+                        "results": results,
+                        "source": "Web Search (Google fallback)",
+                        "url": f"https://www.google.com/search?q={quoted}"
+                    }
+    except Exception as e:
+        logger.warning(f"HTML search scraping failed: {e}")
+
+    return {
+        "title": f"Information about '{query}'",
+        "description": f"Search details for '{query}'. Click below to explore real-time search engine results.",
+        "url": f"https://www.google.com/search?q={urllib.parse.quote(query)}",
+        "source": "Google Search"
+    }
+
+
 @router.post("/transcribe")
 async def transcribe_audio(
     file: UploadFile = File(...),
@@ -219,6 +297,7 @@ async def summarize_text(data: SummarizeRequest, current_user=Depends(get_curren
 @router.post("/generate-image")
 async def generate_image(data: GenerateImageRequest, current_user=Depends(get_current_user)):
     start = time.time()
+    search_data = await get_google_data(data.prompt)
     try:
         from diffusers import StableDiffusionPipeline
         import torch
@@ -239,6 +318,7 @@ async def generate_image(data: GenerateImageRequest, current_user=Depends(get_cu
         return {
             "image_url": image_url,
             "prompt": data.prompt,
+            "search_data": search_data,
             "latency_ms": round((time.time() - start) * 1000, 2),
         }
     except Exception as img_err:
@@ -250,6 +330,7 @@ async def generate_image(data: GenerateImageRequest, current_user=Depends(get_cu
         return {
             "image_url": image_url,
             "prompt": data.prompt,
+            "search_data": search_data,
             "note": "Demo mode powered by Pollinations AI.",
             "latency_ms": round((time.time() - start) * 1000, 2),
         }
