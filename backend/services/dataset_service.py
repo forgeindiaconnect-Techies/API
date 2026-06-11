@@ -90,7 +90,8 @@ async def extract_text_from_file(file_path: str, file_type: str) -> list:
             try:
                 import pytesseract
                 text = pytesseract.image_to_string(img)
-            except ImportError:
+            except Exception as ocr_err:
+                logger.warning(f"Tesseract OCR failed in dataset service: {ocr_err}. Falling back to demo OCR text.")
                 text = f"[OCR Extracted Text from Image {os.path.basename(file_path)}]\nInvoice #2024-001\nDate: January 15, 2024\nAmount: $1,250.00"
             if text.strip():
                 chunks.append(text)

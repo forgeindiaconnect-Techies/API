@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useDropzone } from 'react-dropzone'
 import { Image, Mic, FileText, Wand2, Upload, Loader, Copy, Download, X } from 'lucide-react'
 import toast from 'react-hot-toast'
+import { multimodalAPI } from '../services/api'
 
 const MODES = [
   { id: 'ocr', label: 'OCR Extraction', icon: FileText, desc: 'Extract text from images', accept: { 'image/*': [] } },
@@ -106,6 +107,7 @@ export default function MultimodalPage() {
         }
       }
     } catch (err) {
+      console.error("AI processing error:", err)
       toast.error('AI processing failed')
     } finally {
       setLoading(false)

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from auth.utils import get_current_user
 from config import settings
-import logging, os, uuid, time
+import logging, os, uuid, time, tempfile
 
 router = APIRouter(prefix="/ai", tags=["AI / Multimodal"])
 logger = logging.getLogger(__name__)
@@ -32,7 +32,7 @@ async def transcribe_audio(
         raise HTTPException(status_code=400, detail="Unsupported audio format")
 
     # Save temp file
-    tmp_path = f"/tmp/{uuid.uuid4()}.{ext}"
+    tmp_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.{ext}")
     try:
         content = await file.read()
         with open(tmp_path, "wb") as f:
@@ -49,9 +49,10 @@ async def transcribe_audio(
                 "segments": result.get("segments", []),
                 "confidence": 0.94,
             }
-        except ImportError:
+        except Exception as whisper_err:
+            logger.warning(f"Whisper transcription failed: {whisper_err}. Falling back to demo mode.")
             return {
-                "text": f"[Transcription demo] Audio file '{file.filename}' received. Install Whisper for real transcription: pip install openai-whisper",
+                "text": f"[Transcription demo] Audio file '{file.filename}' received. Install Whisper for real transcription: pip install openai-whisper (Error: {whisper_err})",
                 "language": language,
                 "segments": [],
                 "confidence": 1.0,
@@ -94,9 +95,10 @@ async def extract_ocr(
             import pytesseract
             text = pytesseract.image_to_string(img)
             return {"text": text, "confidence": 0.92, "method": "tesseract"}
-        except ImportError:
+        except Exception as ocr_err:
+            logger.warning(f"Tesseract OCR failed: {ocr_err}. Falling back to demo OCR.")
             return {
-                "text": f"[OCR Demo] Text extracted from {file.filename}.\nInstall pytesseract for real OCR.\n\nSample extracted text:\nInvoice #2024-001\nDate: January 15, 2024\nAmount: $1,250.00",
+                "text": f"[OCR Demo] Text extracted from {file.filename}.\nInstall pytesseract and the Tesseract binary for real OCR.\n\nSample extracted text:\nInvoice #2024-001\nDate: January 15, 2024\nAmount: $1,250.00",
                 "confidence": 1.0,
                 "method": "demo",
             }
@@ -175,18 +177,19 @@ async def generate_image(data: GenerateImageRequest, current_user=Depends(get_cu
         w, h = [int(x) for x in data.size.split("x")]
         image = pipe(data.prompt, num_inference_steps=data.steps, width=w, height=h).images[0]
 
-        out_path = f"/tmp/{uuid.uuid4()}.png"
+        out_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.png")
         image.save(out_path)
         return {
             "image_path": out_path,
             "prompt": data.prompt,
             "latency_ms": round((time.time() - start) * 1000, 2),
         }
-    except ImportError:
+    except Exception as img_err:
+        logger.warning(f"Image generation failed: {img_err}. Falling back to demo mode.")
         return {
             "image_url": f"https://picsum.photos/seed/{hash(data.prompt) % 1000}/512/512",
             "prompt": data.prompt,
-            "note": "Demo mode. Install diffusers for real image generation.",
+            "note": f"Demo mode. Image generation error: {str(img_err)}",
             "latency_ms": round((time.time() - start) * 1000, 2),
         }
 
