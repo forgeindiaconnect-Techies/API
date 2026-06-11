@@ -19,6 +19,7 @@ export default function ApiKeysPage() {
   // Inline renaming states
   const [editingId, setEditingId] = useState(null)
   const [editingName, setEditingName] = useState("")
+  const [creating, setCreating] = useState(false)
 
   const SCOPES = ['chat', 'predict', 'embed', 'transcribe', 'generate-image']
 
@@ -88,6 +89,7 @@ export default function ApiKeysPage() {
   const createKey = async () => {
     if (!newKey.name.trim()) { toast.error('Name required'); return }
     try {
+      setCreating(true)
       const { data } = await apiKeyAPI.create({
         name: newKey.name,
         scopes: newKey.scopes,
@@ -99,7 +101,11 @@ export default function ApiKeysPage() {
       toast.success('API key created successfully!')
       fetchKeys()
     } catch (err) {
-      toast.error('Failed to generate API key')
+      console.error(err)
+      const errMsg = err.response?.data?.detail || 'Failed to generate API key'
+      toast.error(errMsg)
+    } finally {
+      setCreating(false)
     }
   }
 
@@ -175,8 +181,9 @@ export default function ApiKeysPage() {
                 </div>
               </div>
 
-              <button onClick={createKey} className="btn-primary w-full justify-center">
-                <Key size={14} /> Generate Key
+              <button onClick={createKey} disabled={creating} className="btn-primary w-full justify-center gap-2" style={{ opacity: creating ? 0.7 : 1 }}>
+                {creating ? <Loader className="animate-spin" size={14} /> : <Key size={14} />}
+                {creating ? 'Generating...' : 'Generate Key'}
               </button>
             </motion.div>
           </motion.div>

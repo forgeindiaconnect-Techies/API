@@ -136,6 +136,44 @@ def get_db():
     return db
 
 
+def doc_matches_query(doc: dict, query: dict) -> bool:
+    if not query:
+        return True
+    for k, v in query.items():
+        if k == "$or":
+            if not isinstance(v, list):
+                return False
+            if not any(doc_matches_query(doc, sub) for sub in v):
+                return False
+        elif k == "$and":
+            if not isinstance(v, list):
+                return False
+            if not all(doc_matches_query(doc, sub) for sub in v):
+                return False
+        elif k.startswith("$"):
+            continue
+        else:
+            val = doc.get(k)
+            if isinstance(v, dict):
+                for op, op_val in v.items():
+                    if op == "$in":
+                        if not isinstance(op_val, (list, tuple, set)):
+                            return False
+                        if val not in op_val and str(val) not in [str(x) for x in op_val]:
+                            return False
+                    elif op == "$exists":
+                        exists = k in doc
+                        if exists != bool(op_val):
+                            return False
+                    elif op == "$ne":
+                        if val == op_val or str(val) == str(op_val):
+                            return False
+            else:
+                if val != v and str(val) != str(v):
+                    return False
+    return True
+
+
 class MockDB:
     """Simple in-memory database for development without MongoDB"""
     def __init__(self):
@@ -167,7 +205,7 @@ class MockCollection:
 
     async def find_one(self, query):
         for doc in self._data:
-            if all(doc.get(k) == v for k, v in query.items() if not k.startswith("$")):
+            if doc_matches_query(doc, query):
                 return doc.copy()
         return None
 
@@ -176,7 +214,7 @@ class MockCollection:
 
     async def update_one(self, query, update, upsert=False):
         for doc in self._data:
-            if all(doc.get(k) == v for k, v in query.items()):
+            if doc_matches_query(doc, query):
                 if "$set" in update:
                     doc.update(update["$set"])
                 return
@@ -187,7 +225,7 @@ class MockCollection:
 
     async def delete_one(self, query):
         for i, doc in enumerate(self._data):
-            if all(doc.get(k) == v for k, v in query.items()):
+            if doc_matches_query(doc, query):
                 self._data.pop(i)
                 break
 
@@ -198,7 +236,7 @@ class MockCollection:
     async def count_documents(self, query=None):
         if not query:
             return len(self._data)
-        return sum(1 for d in self._data if all(d.get(k) == v for k, v in query.items()))
+        return sum(1 for d in self._data if doc_matches_query(d, query))
 
     async def create_index(self, *args, **kwargs):
         pass
@@ -206,7 +244,7 @@ class MockCollection:
 
 class MockCursor:
     def __init__(self, data, query):
-        self._data = [d for d in data if all(d.get(k) == v for k, v in query.items() if not k.startswith("$"))]
+        self._data = [d for d in data if doc_matches_query(d, query)]
         self._sort_key = None
         self._limit_val = None
         self._skip_val = 0

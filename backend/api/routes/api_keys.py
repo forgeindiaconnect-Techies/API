@@ -79,6 +79,7 @@ async def list_api_keys(current_user=Depends(get_current_user)):
 @router.post("")
 async def create_api_key(data: ApiKeyCreate, current_user=Depends(get_current_user)):
     db = get_db()
+    logger.info(f"API Key creation request for user '{current_user.get('email')}' with name: '{data.name}' and rate limit: {data.rate_limit}")
     full_key, prefix, key_hash = generate_api_key()
 
     expires_at = None
@@ -102,6 +103,7 @@ async def create_api_key(data: ApiKeyCreate, current_user=Depends(get_current_us
 
     result = await db.api_keys.insert_one(doc)
     doc["_id"] = result.inserted_id
+    logger.info(f"Successfully generated API Key '{data.name}' (ID: {doc['_id']}) for user '{current_user.get('email')}'")
 
     return fmt_key(doc, show_key=True, raw_key=full_key)
 
@@ -109,6 +111,7 @@ async def create_api_key(data: ApiKeyCreate, current_user=Depends(get_current_us
 @router.delete("/{key_id}")
 async def revoke_api_key(key_id: str, current_user=Depends(get_current_user)):
     db = get_db()
+    logger.info(f"API Key revocation request for key ID: '{key_id}' by user '{current_user.get('email')}'")
     try:
         oid = ObjectId(key_id)
         query = {"_id": oid, "user_id": str(current_user["_id"])}
@@ -117,9 +120,11 @@ async def revoke_api_key(key_id: str, current_user=Depends(get_current_user)):
 
     k = await db.api_keys.find_one(query)
     if not k:
+        logger.warning(f"API Key revocation failed: key ID '{key_id}' not found for user '{current_user.get('email')}'")
         raise HTTPException(status_code=404, detail="API key not found")
 
     await db.api_keys.update_one(query, {"$set": {"is_active": False, "status": "revoked"}})
+    logger.info(f"Successfully revoked API Key ID '{key_id}' for user '{current_user.get('email')}'")
     return {"message": "API key revoked"}
 
 
@@ -145,6 +150,7 @@ async def rename_api_key(key_id: str, data: ApiKeyUpdate, current_user=Depends(g
 @router.post("/{key_id}/rotate")
 async def rotate_api_key(key_id: str, current_user=Depends(get_current_user)):
     db = get_db()
+    logger.info(f"API Key rotation request for key ID: '{key_id}' by user '{current_user.get('email')}'")
     try:
         oid = ObjectId(key_id)
         query = {"_id": oid, "user_id": str(current_user["_id"])}
@@ -153,6 +159,7 @@ async def rotate_api_key(key_id: str, current_user=Depends(get_current_user)):
 
     k = await db.api_keys.find_one(query)
     if not k:
+        logger.warning(f"API Key rotation failed: key ID '{key_id}' not found for user '{current_user.get('email')}'")
         raise HTTPException(status_code=404, detail="API key not found")
 
     full_key, prefix, key_hash = generate_api_key()
@@ -167,6 +174,7 @@ async def rotate_api_key(key_id: str, current_user=Depends(get_current_user)):
     )
     
     updated_k = await db.api_keys.find_one(query)
+    logger.info(f"Successfully rotated API Key ID '{key_id}' for user '{current_user.get('email')}'")
     return fmt_key(updated_k, show_key=True, raw_key=full_key)
 
 

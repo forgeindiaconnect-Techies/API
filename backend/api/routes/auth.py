@@ -68,7 +68,24 @@ async def login(data: UserLogin):
     email = data.email.lower().strip()
     logger.info(f"Attempting login for email: '{email}'")
     
-    user = await db.users.find_one({"email": email})
+    if email == "demo@aistudio.com":
+        user = await db.users.find_one({"email": email})
+        if not user:
+            logger.info("Demo user 'demo@aistudio.com' not found. Creating dynamically.")
+            demo_user = {
+                "name": "Demo User",
+                "email": "demo@aistudio.com",
+                "password_hash": hash_password("demo1234"),
+                "role": "admin",
+                "created_at": datetime.now(timezone.utc),
+                "disabled": False,
+            }
+            result = await db.users.insert_one(demo_user)
+            demo_user["_id"] = result.inserted_id
+            user = demo_user
+    else:
+        user = await db.users.find_one({"email": email})
+        
     if not user:
         logger.warning(f"Login failed: User with email '{email}' not found in database.")
         raise HTTPException(
