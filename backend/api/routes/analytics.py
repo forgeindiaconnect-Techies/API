@@ -23,25 +23,61 @@ async def get_dashboard(current_user=Depends(get_current_user)):
     })
     conv_count = await db.conversations.count_documents({"user_id": user_id})
 
-    # Single-pass calculation over user messages to prevent DB roundtrip loops
-    total_requests = 0
+    # Fast all-time stats calculation
+    total_requests = await db.messages.count_documents({"user_id": user_id, "role": "user"})
     total_tokens = 0
-    requests_today = 0
-    requests_this_week = 0
-    tokens_this_week = 0
 
     now = datetime.utcnow()
     one_day_ago = now - timedelta(days=1)
     seven_days_ago = now - timedelta(days=7)
-    
-    # Initialize daily request stats for the last 14 days
+    fourteen_days_ago = now - timedelta(days=14)
+
+    # All-time tokens aggregate sum
+    if hasattr(db.messages._collection, "aggregate"):
+        try:
+            pipeline_all = [
+                {"$match": {"user_id": user_id, "role": "user"}},
+                {"$group": {
+                    "_id": None,
+                    "total_tokens": {
+                        "$sum": {
+                            "$ifNull": [
+                                "$tokens_used",
+                                {"$max": [1, {"$floor": {"$divide": [{"$strLenCP": {"$ifNull": ["$content", ""]}}, 4]}}]}
+                            ]
+                        }
+                    }
+                }}
+            ]
+            cursor = db.messages.aggregate(pipeline_all)
+            res = await cursor.to_list(1)
+            if res:
+                total_tokens = res[0].get("total_tokens", 0)
+        except Exception as ae:
+            import logging
+            logging.getLogger(__name__).warning(f"All-time tokens aggregation failed: {ae}")
+    else:
+        # Fallback for MockDB
+        async for msg in db.messages.find({"user_id": user_id, "role": "user"}):
+            total_tokens += msg.get("tokens_used") or max(1, len(msg.get("content", "")) // 4)
+
+    # Binned stats for the last 14 days (optimized query)
+    requests_today = 0
+    requests_this_week = 0
+    tokens_this_week = 0
     daily_stats = { (now - timedelta(days=i)).date(): {"requests": 0, "tokens": 0} for i in range(14) }
 
-    async for msg in db.messages.find({"user_id": user_id, "role": "user"}):
-        total_requests += 1
-        tokens = msg.get("tokens_used") or max(1, len(msg.get("content", "")) // 4)
-        total_tokens += tokens
+    msg_query = {
+        "user_id": user_id,
+        "role": "user",
+        "$or": [
+            {"created_at": {"$gte": fourteen_days_ago}},
+            {"created_at": {"$gte": fourteen_days_ago.isoformat()}}
+        ]
+    }
 
+    async for msg in db.messages.find(msg_query):
+        tokens = msg.get("tokens_used") or max(1, len(msg.get("content", "")) // 4)
         created_at = msg.get("created_at")
         if isinstance(created_at, str):
             try:
@@ -117,8 +153,18 @@ async def get_usage(
 
     # Initialize stats daily binning map
     daily_stats = { (now - timedelta(days=i)).date(): {"requests": 0, "tokens": 0} for i in range(days) }
+    days_ago = now - timedelta(days=days)
 
-    async for msg in db.messages.find({"user_id": user_id, "role": "user"}):
+    msg_query = {
+        "user_id": user_id,
+        "role": "user",
+        "$or": [
+            {"created_at": {"$gte": days_ago}},
+            {"created_at": {"$gte": days_ago.isoformat()}}
+        ]
+    }
+
+    async for msg in db.messages.find(msg_query):
         created_at = msg.get("created_at")
         if isinstance(created_at, str):
             try:
