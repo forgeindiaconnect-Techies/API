@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Python deps
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --default-timeout=100 --retries 5 -r requirements.txt
 
 # Pre-download SentenceTransformer model to cache it inside the Docker image (lightweight download to prevent builder OOM)
 ENV HF_HOME=/root/.cache/huggingface
