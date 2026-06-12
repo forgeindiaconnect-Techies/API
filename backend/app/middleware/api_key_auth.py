@@ -67,10 +67,18 @@ class APIKeyAuthMiddleware:
 
         # 1. Read API Key from headers (X-API-Key or Authorization Bearer)
         api_key = request.headers.get("x-api-key")
+        is_bearer = False
         if not api_key:
             auth_header = request.headers.get("authorization")
             if auth_header and auth_header.startswith("Bearer "):
                 api_key = auth_header.split(" ")[1]
+                is_bearer = True
+
+        # If it's a Bearer token but doesn't start with 'sk-', it's a standard user JWT session.
+        # Bypass API key validation and let AuthMiddleware validate the JWT token.
+        if is_bearer and api_key and not api_key.startswith("sk-"):
+            await self.app(scope, receive, send)
+            return
 
         if not api_key:
             response = self._cors_response(origin, 401, {"detail": "Invalid or inactive API key"})
