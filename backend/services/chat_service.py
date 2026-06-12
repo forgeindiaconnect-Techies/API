@@ -1,5 +1,6 @@
 import logging
 from database import get_db
+from auth.utils import get_id_query
 from vector_db.store import VectorStore, get_embedding_model, get_embedding_model_async
 from ollama import AsyncClient
 from openai import AsyncOpenAI
@@ -78,7 +79,7 @@ async def query_dataset_rag(index_id: str, question: str, top_k: int = 5, db = N
     if clean_question in thanks:
         return {"answer": "You're very welcome! Let me know if you have any other questions.", "sources": []}
     # 1. Fetch index and dataset documents from DB
-    index = await db.rag_indexes.find_one({"_id": index_id})
+    index = await db.rag_indexes.find_one({"_id": get_id_query(index_id)})
     if not index:
         return {"answer": "Index not found.", "sources": []}
 
@@ -90,7 +91,7 @@ async def query_dataset_rag(index_id: str, question: str, top_k: int = 5, db = N
     logger.info("✓ Dataset indexed")
         
     dataset_id = index.get("dataset_id")
-    dataset = await db.datasets.find_one({"_id": dataset_id})
+    dataset = await db.datasets.find_one({"_id": get_id_query(dataset_id)})
     source_name = dataset.get("file_name") or dataset.get("name", "unknown")
 
     # 2. Get active embedder model (tiered fallback)

@@ -15,7 +15,7 @@ from models import (
     ConversationCreate, ConversationResponse,
     MessageCreate, MessageResponse, StreamRequest
 )
-from auth.utils import get_current_user
+from auth.utils import get_current_user, get_id_query
 from database import get_db
 from config import settings
 
@@ -75,7 +75,7 @@ async def create_conversation(data: ConversationCreate, current_user=Depends(get
 async def delete_conversation(conversation_id: str, current_user=Depends(get_current_user)):
     db = get_db()
     await db.conversations.delete_one({
-        "_id": conversation_id,
+        "_id": get_id_query(conversation_id),
         "user_id": str(current_user["_id"])
     })
     await db.messages.delete_many({"conversation_id": conversation_id})
@@ -106,6 +106,7 @@ async def send_message(
         "conversation_id": conversation_id,
         "user_id": str(current_user["_id"]),
         "created_at": datetime.utcnow(),
+        "tokens_used": max(1, len(data.content) // 4),
     }
     u_result = await db.messages.insert_one(user_msg)
     user_msg["_id"] = str(u_result.inserted_id)
@@ -120,13 +121,14 @@ async def send_message(
         "conversation_id": conversation_id,
         "user_id": str(current_user["_id"]),
         "created_at": datetime.utcnow(),
+        "tokens_used": max(1, len(ai_content) // 4),
     }
     a_result = await db.messages.insert_one(ai_msg)
     ai_msg["_id"] = str(a_result.inserted_id)
 
     # Update conversation
     await db.conversations.update_one(
-        {"_id": conversation_id},
+        {"_id": get_id_query(conversation_id)},
         {"$set": {"updated_at": datetime.utcnow()}, "$inc": {"message_count": 2}}
     )
 
@@ -147,7 +149,7 @@ async def ensure_dataset_indexed(dataset_id: str, db) -> str:
             logger.error(f"Error checking vector store count: {e}")
 
     # Find the dataset
-    dataset = await db.datasets.find_one({"_id": dataset_id})
+    dataset = await db.datasets.find_one({"_id": get_id_query(dataset_id)})
     if not dataset:
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_id} not found")
 
@@ -199,6 +201,7 @@ async def stream_message(
         "conversation_id": conversation_id,
         "user_id": str(current_user["_id"]),
         "created_at": datetime.utcnow(),
+        "tokens_used": max(1, len(data.content) // 4),
     }
     await db.messages.insert_one(user_msg)
 
@@ -228,12 +231,13 @@ async def stream_message(
                 "conversation_id": conversation_id,
                 "user_id": str(current_user["_id"]),
                 "created_at": datetime.utcnow(),
+                "tokens_used": max(1, len(answer_content) // 4),
             }
             await db.messages.insert_one(ai_msg)
 
             # Update conversation message count and updated_at
             await db.conversations.update_one(
-                {"_id": conversation_id},
+                {"_id": get_id_query(conversation_id)},
                 {"$set": {"updated_at": datetime.utcnow()}, "$inc": {"message_count": 2}}
             )
             yield "data: [DONE]\n\n"

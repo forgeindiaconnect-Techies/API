@@ -3,6 +3,7 @@ import os
 import asyncio
 from datetime import datetime
 from database import get_db
+from auth.utils import get_id_query
 
 logger = logging.getLogger(__name__)
 
@@ -21,19 +22,19 @@ async def _build_index(index_id: str, config: dict, db):
     temp_path = None
     dataset = None
     try:
-        index_doc = await db.rag_indexes.find_one({"_id": index_id})
+        index_doc = await db.rag_indexes.find_one({"_id": get_id_query(index_id)})
         if not index_doc:
             logger.warning(f"Index document {index_id} not found in DB.")
             return
             
         dataset_id = index_doc["dataset_id"]
-        dataset = await db.datasets.find_one({"_id": dataset_id})
+        dataset = await db.datasets.find_one({"_id": get_id_query(dataset_id)})
         if not dataset:
             raise Exception("Dataset not found")
 
         # Set status to building in database
         await db.rag_indexes.update_one(
-            {"_id": index_id},
+            {"_id": get_id_query(index_id)},
             {"$set": {"status": "building", "error": None}}
         )
 
@@ -81,7 +82,7 @@ async def _build_index(index_id: str, config: dict, db):
             await store.add_documents(chunks, embeddings, metadatas, ids)
 
             await db.rag_indexes.update_one(
-                {"_id": index_id},
+                {"_id": get_id_query(index_id)},
                 {"$set": {"status": "ready", "chunk_count": len(chunks), "error": None}}
             )
             logger.info(f"Rebuild status: Index {index_id} built successfully with {len(chunks)} chunks.")
@@ -91,7 +92,7 @@ async def _build_index(index_id: str, config: dict, db):
     except Exception as e:
         logger.error(f"Failed to build index {index_id}: {e}")
         await db.rag_indexes.update_one(
-            {"_id": index_id},
+            {"_id": get_id_query(index_id)},
             {"$set": {"status": "error", "error": str(e)}}
         )
     finally:
@@ -106,7 +107,7 @@ async def _build_index(index_id: str, config: dict, db):
                 logger.error(f"Failed to delete temp file {temp_path}: {clean_err}")
 
 async def query_vector_store(index_id: str, query: str, top_k: int, db) -> list:
-    index = await db.rag_indexes.find_one({"_id": index_id})
+    index = await db.rag_indexes.find_one({"_id": get_id_query(index_id)})
     if not index:
         return []
 

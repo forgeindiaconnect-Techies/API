@@ -121,6 +121,7 @@ async def create_indexes():
         await db.messages.create_index([("user_id", ASCENDING)])
         await db.messages.create_index([("conversation_id", ASCENDING)])
         await db.messages.create_index([("created_at", DESCENDING)])
+        await db.messages.create_index([("user_id", ASCENDING), ("role", ASCENDING), ("created_at", DESCENDING)])
         await db.rag_indexes.create_index([("user_id", ASCENDING)])
         await db.rag_indexes.create_index([("dataset_id", ASCENDING)])
         await db.api_keys.create_index([("key_hash", ASCENDING)], unique=True)

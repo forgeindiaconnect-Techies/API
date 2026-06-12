@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from database import get_db
+from auth.utils import get_id_query
 from services.chroma_service import collection_is_empty
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,7 @@ async def run_rebuild_locally(dataset_id: str):
             logger.error("Local Rebuild: Database not connected. Aborting rebuild.")
             return
             
-        dataset = await db.datasets.find_one({"_id": dataset_id})
+        dataset = await db.datasets.find_one({"_id": get_id_query(dataset_id)})
         if not dataset:
             logger.error(f"Local Rebuild: Dataset '{dataset_id}' not found in database.")
             return

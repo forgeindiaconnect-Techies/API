@@ -314,7 +314,8 @@ async def verify_key_permissions(
     if dataset_id:
         allowed_datasets = api_key.get("dataset_ids", [])
         if allowed_datasets:
-            if dataset_id not in allowed_datasets:
+            allowed_datasets_str = [str(did) for did in allowed_datasets]
+            if str(dataset_id) not in allowed_datasets_str:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="API Key is not authorized to access this dataset"
@@ -324,8 +325,10 @@ async def verify_key_permissions(
     if model_id:
         allowed_models = api_key.get("model_ids", [])
         if allowed_models:
-            if model_id not in allowed_models:
+            allowed_models_str = [str(mid) for mid in allowed_models]
+            if str(model_id) not in allowed_models_str:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="API Key is not authorized to access this model"
                 )
+

@@ -6,7 +6,7 @@ from bson.errors import InvalidId
 import os, shutil, uuid, logging, asyncio
 
 from models import DatasetResponse, ProcessingOptions, EDAResponse
-from auth.utils import get_current_user, validate_object_id
+from auth.utils import get_current_user, validate_object_id, get_id_query
 from database import get_db
 from config import settings
 from datasets.processor import process_dataset, run_eda
@@ -53,8 +53,7 @@ def get_user_query(current_user: dict) -> dict:
 async def fetch_user_dataset_or_raise(dataset_id: str, current_user: dict) -> dict:
     logger.info(f"Fetching dataset details for ID: {dataset_id} | User: {current_user.get('_id')}")
     
-    oid = validate_object_id(dataset_id)
-    id_query = {"$in": [oid, dataset_id]}
+    id_query = get_id_query(dataset_id)
 
     db = get_db()
     if db is None:

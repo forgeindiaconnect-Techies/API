@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from auth.utils import get_id_query
 import time
 import math
 from datetime import datetime
@@ -24,7 +25,7 @@ async def start_training_job(job_id: str, model_id: str, config: Dict[str, Any],
         
         # Load dataset metadata
         dataset_id = config.get("dataset_id")
-        dataset = await db.datasets.find_one({"_id": dataset_id})
+        dataset = await db.datasets.find_one({"_id": get_id_query(dataset_id)})
         if not dataset:
             raise ValueError(f"Dataset {dataset_id} not found")
 
@@ -130,7 +131,7 @@ async def start_training_job(job_id: str, model_id: str, config: Dict[str, Any],
 
             # Update collections
             await db.training_jobs.update_one(
-                {"_id": job_id},
+                {"_id": get_id_query(job_id)},
                 {"$set": {
                     "status": "ready",
                     "progress": 100.0,
@@ -140,7 +141,7 @@ async def start_training_job(job_id: str, model_id: str, config: Dict[str, Any],
             )
 
             await db.models.update_one(
-                {"_id": model_id},
+                {"_id": get_id_query(model_id)},
                 {"$set": {
                     "status": "ready",
                     "accuracy": metrics.get("accuracy", 0.0),
@@ -157,11 +158,11 @@ async def start_training_job(job_id: str, model_id: str, config: Dict[str, Any],
         logger.error(f"Training job {job_id} failed: {e}")
         await _log(db, job_id, f"Error: {str(e)}", "ERROR")
         await db.training_jobs.update_one(
-            {"_id": job_id},
+            {"_id": get_id_query(job_id)},
             {"$set": {"status": "error", "error": str(e), "completed_at": datetime.utcnow()}}
         )
         await db.models.update_one(
-            {"_id": model_id},
+            {"_id": get_id_query(model_id)},
             {"$set": {"status": "error"}}
         )
 
@@ -193,7 +194,7 @@ async def run_simulation(job_id: str, model_id: str, config: Dict[str, Any], db)
 
     for step in range(1, total_steps + 1):
         # Check if training was stopped by user in the database
-        job = await db.training_jobs.find_one({"_id": job_id})
+        job = await db.training_jobs.find_one({"_id": get_id_query(job_id)})
         if not job or job.get("status") == "stopped":
             await _log(db, job_id, "Training stopped by user.", "WARNING")
             return
@@ -215,7 +216,7 @@ async def run_simulation(job_id: str, model_id: str, config: Dict[str, Any], db)
             )
 
         await db.training_jobs.update_one(
-            {"_id": job_id},
+            {"_id": get_id_query(job_id)},
             {"$set": {
                 "progress": round(progress, 1),
                 "current_epoch": epoch,
@@ -266,7 +267,7 @@ async def run_simulation(job_id: str, model_id: str, config: Dict[str, Any], db)
         size_bytes = 1024
 
     await db.training_jobs.update_one(
-        {"_id": job_id},
+        {"_id": get_id_query(job_id)},
         {"$set": {
             "status": "ready",
             "progress": 100.0,
@@ -276,7 +277,7 @@ async def run_simulation(job_id: str, model_id: str, config: Dict[str, Any], db)
     )
 
     await db.models.update_one(
-        {"_id": model_id},
+        {"_id": get_id_query(model_id)},
         {"$set": {
             "status": "ready",
             "accuracy": metrics["accuracy"],

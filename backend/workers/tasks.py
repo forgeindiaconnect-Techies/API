@@ -1,4 +1,5 @@
 from workers.celery_app import celery_app
+from auth.utils import get_id_query
 import logging
 
 logger = logging.getLogger(__name__)
@@ -99,7 +100,7 @@ def rebuild_dataset_index_task(self, dataset_id: str):
             await connect_db()
             db = get_db()
 
-        dataset = await db.datasets.find_one({"_id": dataset_id})
+        dataset = await db.datasets.find_one({"_id": get_id_query(dataset_id)})
         if not dataset:
             logger.error(f"Celery Worker: Dataset {dataset_id} not found.")
             return

@@ -135,7 +135,7 @@ async def start_training(
 @router.get("/training/{job_id}")
 async def get_training_status(job_id: str, current_user=Depends(get_current_user)):
     db = get_db()
-    job = await db.training_jobs.find_one({"_id": job_id, "user_id": str(current_user["_id"])})
+    job = await db.training_jobs.find_one({"_id": get_id_query(job_id), "user_id": str(current_user["_id"])})
     if not job:
         raise HTTPException(status_code=404, detail="Training job not found")
     return fmt_job(job)
@@ -145,7 +145,7 @@ async def get_training_status(job_id: str, current_user=Depends(get_current_user
 async def stop_training(job_id: str, current_user=Depends(get_current_user)):
     db = get_db()
     await db.training_jobs.update_one(
-        {"_id": job_id},
+        {"_id": get_id_query(job_id)},
         {"$set": {"status": "stopped", "completed_at": datetime.utcnow()}}
     )
     return {"message": "Training stopped"}
