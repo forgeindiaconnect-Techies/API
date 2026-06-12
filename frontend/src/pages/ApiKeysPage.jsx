@@ -356,133 +356,143 @@ export default function ApiKeysPage() {
         </motion.div>
       ) : (
         <div className="space-y-3">
-          {apiKeys.map((k, i) => (
-            <motion.div key={k.id} className="card p-5"
-              initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.06 }}>
-              <div className="flex items-start justify-between mb-3">
-                <div className="flex items-center gap-3 flex-1 min-w-0">
-                  <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
-                    style={{ background: k.is_active ? 'rgba(16,185,129,0.1)' : 'var(--bg-tertiary)' }}>
-                    <Key size={15} style={{ color: k.is_active ? '#10b981' : 'var(--text-muted)' }} />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    {editingId === k.id ? (
-                      <div className="flex items-center gap-1.5 mt-0.5">
-                        <input
-                          className="input-base text-sm py-1 px-2.5 max-w-[240px]"
-                          value={editingName}
-                          onChange={e => setEditingName(e.target.value)}
-                          autoFocus
-                          onKeyDown={e => {
-                            if (e.key === 'Enter') renameKey(k.id)
-                            if (e.key === 'Escape') cancelRename()
-                          }}
-                        />
-                        <button onClick={() => renameKey(k.id)} className="p-1 rounded bg-green-500/10 text-green-400 hover:bg-green-500/20" title="Save">
-                          <Check size={14} />
-                        </button>
-                        <button onClick={cancelRename} className="p-1 rounded bg-red-500/10 text-red-400 hover:bg-red-500/20" title="Cancel">
-                          <X size={14} />
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-2">
-                        <p className="font-semibold text-sm truncate" style={{ color: 'var(--text-primary)' }}>{k.name}</p>
-                        {k.is_active && (
-                          <button onClick={() => startRename(k.id, k.name)} className="p-0.5 text-slate-500 hover:text-slate-300 transition-colors" title="Rename Key">
-                            <Edit2 size={12} />
+          {apiKeys.map((k, i) => {
+            const reqCount = k.request_count ?? k.requests_count ?? 0
+            const rateLimit = k.rate_limit ?? 10000
+            const scopes = k.scopes || []
+            const allowedDatasets = k.allowed_datasets || k.dataset_ids || []
+            const allowedModels = k.allowed_models || k.model_ids || []
+            const isKeyActive = k.is_active ?? (k.status === 'active')
+            const keyValue = k.key || maskKey(k.key_prefix)
+
+            return (
+              <motion.div key={k.id} className="card p-5"
+                initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.06 }}>
+                <div className="flex items-start justify-between mb-3">
+                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                    <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
+                      style={{ background: isKeyActive ? 'rgba(16,185,129,0.1)' : 'var(--bg-tertiary)' }}>
+                      <Key size={15} style={{ color: isKeyActive ? '#10b981' : 'var(--text-muted)' }} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      {editingId === k.id ? (
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <input
+                            className="input-base text-sm py-1 px-2.5 max-w-[240px]"
+                            value={editingName}
+                            onChange={e => setEditingName(e.target.value)}
+                            autoFocus
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') renameKey(k.id)
+                              if (e.key === 'Escape') cancelRename()
+                            }}
+                          />
+                          <button onClick={() => renameKey(k.id)} className="p-1 rounded bg-green-500/10 text-green-400 hover:bg-green-500/20" title="Save">
+                            <Check size={14} />
                           </button>
-                        )}
-                      </div>
-                    )}
-                    <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
-                      Created {new Date(k.created_at).toLocaleDateString()}
-                    </p>
-                  </div>
-                </div>
-                <span className={`badge ${k.is_active ? 'badge-green' : 'badge-red'}`}>
-                  {k.is_active ? 'Active' : 'Revoked'}
-                </span>
-              </div>
-
-              {/* Key Value */}
-              <div className="flex items-center justify-between gap-2 p-3 rounded-lg mb-3"
-                style={{ background: 'var(--bg-tertiary)', fontFamily: 'JetBrains Mono, monospace' }}>
-                <code className="text-xs flex-1 truncate" style={{ color: 'var(--text-secondary)' }}>
-                  {k.key}
-                </code>
-                {k.is_active && (
-                  <button onClick={() => copyKey(k.id, k.key)}
-                    className="flex-shrink-0 p-1 text-slate-500 hover:text-slate-300 transition-colors"
-                    title="Copy Key">
-                    <Copy size={13} />
-                  </button>
-                )}
-              </div>
-
-              {/* Bound Resources */}
-              {((k.allowed_datasets && k.allowed_datasets.length > 0) || (k.allowed_models && k.allowed_models.length > 0)) && (
-                <div className="mt-1 mb-3 text-xs space-y-1.5 p-2 rounded border" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }}>
-                  {k.allowed_datasets && k.allowed_datasets.length > 0 && (
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="font-semibold text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-secondary)' }}>Allowed Datasets:</span>
-                      {k.allowed_datasets.map(id => (
-                        <span key={id} className="badge badge-green text-[10px] py-0.5 px-1.5">
-                          {getDatasetName(id)}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  {k.allowed_models && k.allowed_models.length > 0 && (
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="font-semibold text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-secondary)' }}>Allowed Models:</span>
-                      {k.allowed_models.map(id => (
-                        <span key={id} className="badge badge-violet text-[10px] py-0.5 px-1.5">
-                          {getModelName(id)}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="flex gap-1 flex-wrap">
-                    {k.scopes.map(s => <span key={s} className="badge badge-violet text-xs">{s}</span>)}
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-4">
-                  <div className="text-right">
-                    <p className="text-xs font-semibold" style={{ color: 'var(--text-primary)' }}>
-                      {k.request_count.toLocaleString()} / {k.rate_limit.toLocaleString()}
-                    </p>
-                    <p className="text-xs" style={{ color: 'var(--text-muted)' }}>requests</p>
-                  </div>
-                  <div className="w-20">
-                    <div className="progress-bar">
-                      <div className="progress-fill" style={{ width: `${Math.min(100, (k.request_count / k.rate_limit) * 100)}%` }} />
+                          <button onClick={cancelRename} className="p-1 rounded bg-red-500/10 text-red-400 hover:bg-red-500/20" title="Cancel">
+                            <X size={14} />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <p className="font-semibold text-sm truncate" style={{ color: 'var(--text-primary)' }}>{k.name}</p>
+                          {isKeyActive && (
+                            <button onClick={() => startRename(k.id, k.name)} className="p-0.5 text-slate-500 hover:text-slate-300 transition-colors" title="Rename Key">
+                              <Edit2 size={12} />
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                        Created {new Date(k.created_at).toLocaleDateString()}
+                      </p>
                     </div>
                   </div>
-                  <div className="text-right min-w-[120px]">
-                    <p className="text-[10px] uppercase tracking-wider font-semibold" style={{ color: 'var(--text-muted)' }}>Last Used</p>
-                    <p className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>{formatLastUsed(k.last_used)}</p>
-                  </div>
-                  {k.is_active && (
-                    <button onClick={() => revokeKey(k.id, k.name)}
-                      className="p-1.5 rounded transition-colors"
-                      style={{ color: 'var(--text-muted)' }}
-                      onMouseEnter={(e) => e.currentTarget.style.color = '#ef4444'}
-                      onMouseLeave={(e) => e.currentTarget.style.color = 'var(--text-muted)'}
-                      title="Revoke Key">
-                      <Trash2 size={14} />
+                  <span className={`badge ${isKeyActive ? 'badge-green' : 'badge-red'}`}>
+                    {isKeyActive ? 'Active' : 'Revoked'}
+                  </span>
+                </div>
+
+                {/* Key Value */}
+                <div className="flex items-center justify-between gap-2 p-3 rounded-lg mb-3"
+                  style={{ background: 'var(--bg-tertiary)', fontFamily: 'JetBrains Mono, monospace' }}>
+                  <code className="text-xs flex-1 truncate" style={{ color: 'var(--text-secondary)' }}>
+                    {keyValue}
+                  </code>
+                  {isKeyActive && (
+                    <button onClick={() => copyKey(k.id, keyValue)}
+                      className="flex-shrink-0 p-1 text-slate-500 hover:text-slate-300 transition-colors"
+                      title="Copy Key">
+                      <Copy size={13} />
                     </button>
                   )}
                 </div>
-              </div>
-            </motion.div>
-          ))}
+
+                {/* Bound Resources */}
+                {((allowedDatasets && allowedDatasets.length > 0) || (allowedModels && allowedModels.length > 0)) && (
+                  <div className="mt-1 mb-3 text-xs space-y-1.5 p-2 rounded border" style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }}>
+                    {allowedDatasets && allowedDatasets.length > 0 && (
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-semibold text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-secondary)' }}>Allowed Datasets:</span>
+                        {allowedDatasets.map(id => (
+                          <span key={id} className="badge badge-green text-[10px] py-0.5 px-1.5">
+                            {getDatasetName(id)}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {allowedModels && allowedModels.length > 0 && (
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-semibold text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-secondary)' }}>Allowed Models:</span>
+                        {allowedModels.map(id => (
+                          <span key={id} className="badge badge-violet text-[10px] py-0.5 px-1.5">
+                            {getModelName(id)}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="flex gap-1 flex-wrap">
+                      {scopes.map(s => <span key={s} className="badge badge-violet text-xs">{s}</span>)}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-4">
+                    <div className="text-right">
+                      <p className="text-xs font-semibold" style={{ color: 'var(--text-primary)' }}>
+                        {reqCount.toLocaleString()} / {rateLimit.toLocaleString()}
+                      </p>
+                      <p className="text-xs" style={{ color: 'var(--text-muted)' }}>requests</p>
+                    </div>
+                    <div className="w-20">
+                      <div className="progress-bar">
+                        <div className="progress-fill" style={{ width: `${Math.min(100, (reqCount / rateLimit) * 100)}%` }} />
+                      </div>
+                    </div>
+                    <div className="text-right min-w-[120px]">
+                      <p className="text-[10px] uppercase tracking-wider font-semibold" style={{ color: 'var(--text-muted)' }}>Last Used</p>
+                      <p className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>{formatLastUsed(k.last_used)}</p>
+                    </div>
+                    {isKeyActive && (
+                      <button onClick={() => revokeKey(k.id, k.name)}
+                        className="p-1.5 rounded transition-colors"
+                        style={{ color: 'var(--text-muted)' }}
+                        onMouseEnter={(e) => e.currentTarget.style.color = '#ef4444'}
+                        onMouseLeave={(e) => e.currentTarget.style.color = 'var(--text-muted)'}
+                        title="Revoke Key">
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </motion.div>
+            )
+          })}
         </div>
       )}
 
