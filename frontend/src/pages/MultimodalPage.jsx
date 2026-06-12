@@ -56,6 +56,8 @@ export default function MultimodalPage() {
   const [loading, setLoading] = useState(false)
   const [prompt, setPrompt] = useState('')
   const [searchData, setSearchData] = useState(null)
+  const [selectedStyle, setSelectedStyle] = useState('Photorealistic')
+  const [selectedSize, setSelectedSize] = useState('512×512')
 
   const currentMode = MODES.find(m => m.id === mode)
 
@@ -85,13 +87,18 @@ export default function MultimodalPage() {
 
     try {
       if (mode === 'generate') {
+        const sizeValue = selectedSize.replace('×', 'x')
         const { data } = await multimodalAPI.generateImage({
           prompt: prompt,
-          style: 'photorealistic',
-          size: '512x512',
+          style: selectedStyle.toLowerCase(),
+          size: sizeValue,
         })
-        setResult(data.image_url || data.image_path)
+        const imageUrl = data.image_url || data.image_path
+        setResult(imageUrl)
         setSearchData(data.search_data)
+        if (imageUrl) {
+          triggerDownload(imageUrl)
+        }
       } else {
         const formData = new FormData()
         formData.append('file', file)
@@ -120,6 +127,43 @@ export default function MultimodalPage() {
   const copyResult = () => {
     navigator.clipboard.writeText(result)
     toast.success('Copied!')
+  }
+
+  const triggerDownload = async (url) => {
+    if (!url) return
+    const filename = `generated_${Date.now()}.png`
+    
+    if (url.startsWith('data:')) {
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      return
+    }
+
+    try {
+      const response = await fetch(url, { mode: 'cors' })
+      const blob = await response.blob()
+      const blobUrl = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = blobUrl
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(blobUrl)
+    } catch (err) {
+      console.error("CORS fetch failed, falling back to new window download", err)
+      const a = document.createElement('a')
+      a.href = url
+      a.target = '_blank'
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+    }
   }
 
   return (
@@ -166,19 +210,32 @@ export default function MultimodalPage() {
                 onChange={e => setPrompt(e.target.value)}
               />
               <div className="grid grid-cols-2 gap-3">
-                {[
-                  { label: 'Style', options: ['Photorealistic', 'Anime', 'Oil Painting', 'Digital Art'] },
-                  { label: 'Size', options: ['512×512', '768×768', '1024×1024'] },
-                ].map(({ label, options }) => (
-                  <div key={label}>
-                    <label className="block text-xs font-semibold mb-1" style={{ color: 'var(--text-secondary)' }}>
-                      {label}
-                    </label>
-                    <select className="input-base text-sm" style={{ background: 'var(--bg-tertiary)' }}>
-                      {options.map(o => <option key={o}>{o}</option>)}
-                    </select>
-                  </div>
-                ))}
+                <div>
+                  <label className="block text-xs font-semibold mb-1" style={{ color: 'var(--text-secondary)' }}>
+                    Style
+                  </label>
+                  <select
+                    className="input-base text-sm"
+                    style={{ background: 'var(--bg-tertiary)' }}
+                    value={selectedStyle}
+                    onChange={e => setSelectedStyle(e.target.value)}
+                  >
+                    {['Photorealistic', 'Anime', 'Oil Painting', 'Digital Art'].map(o => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold mb-1" style={{ color: 'var(--text-secondary)' }}>
+                    Size
+                  </label>
+                  <select
+                    className="input-base text-sm"
+                    style={{ background: 'var(--bg-tertiary)' }}
+                    value={selectedSize}
+                    onChange={e => setSelectedSize(e.target.value)}
+                  >
+                    {['512×512', '768×768', '1024×1024'].map(o => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                </div>
               </div>
             </div>
           ) : (
@@ -254,7 +311,7 @@ export default function MultimodalPage() {
             ) : mode === 'generate' && result ? (
               <div className="space-y-4">
                 <img src={result} alt="generated" className="w-full rounded-lg shadow-md" />
-                <button className="btn-ghost w-full justify-center text-xs">
+                <button onClick={() => triggerDownload(result)} className="btn-ghost w-full justify-center text-xs">
                   <Download size={12} /> Download
                 </button>
 

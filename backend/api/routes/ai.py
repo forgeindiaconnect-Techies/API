@@ -326,18 +326,79 @@ async def generate_image(data: GenerateImageRequest, request: Request, current_u
             "latency_ms": round((time.time() - start) * 1000, 2),
         }
     except Exception as img_err:
-        logger.warning(f"Image generation failed: {img_err}. Falling back to Pollinations AI.")
-        import urllib.parse
-        quoted_prompt = urllib.parse.quote(data.prompt)
-        width, height = data.size.split("x")
-        image_url = f"https://image.pollinations.ai/p/{quoted_prompt}?width={width}&height={height}&nologo=true"
-        return {
-            "image_url": image_url,
-            "prompt": data.prompt,
-            "search_data": search_data,
-            "note": "Demo mode powered by Pollinations AI.",
-            "latency_ms": round((time.time() - start) * 1000, 2),
-        }
+        logger.warning(f"Local Image generation failed: {img_err}. Trying Hugging Face Inference API...")
+        img_bytes = None
+        used_api = ""
+        
+        # 1. Try Hugging Face Inference API if configured
+        if settings.HUGGINGFACE_TOKEN and not settings.HUGGINGFACE_TOKEN.startswith("hf_..."):
+            for model_id in ["black-forest-labs/FLUX.1-schnell", "runwayml/stable-diffusion-v1-5"]:
+                try:
+                    import httpx
+                    api_url = f"https://api-inference.huggingface.co/models/{model_id}"
+                    headers = {
+                        "Authorization": f"Bearer {settings.HUGGINGFACE_TOKEN}",
+                        "Content-Type": "application/json"
+                    }
+                    payload = {"inputs": data.prompt}
+                    async with httpx.AsyncClient(timeout=30) as client:
+                        resp = await client.post(api_url, json=payload, headers=headers)
+                        if resp.status_code == 200:
+                            img_bytes = resp.content
+                            used_api = f"Hugging Face ({model_id})"
+                            break
+                        else:
+                            logger.warning(f"HF model {model_id} failed with status {resp.status_code}: {resp.text}")
+                except Exception as hf_model_err:
+                    logger.warning(f"HF model {model_id} failed with exception: {hf_model_err}")
+        
+        # 2. Try Pollinations AI if Hugging Face failed
+        if not img_bytes:
+            logger.warning("Hugging Face API failed or not configured. Trying Pollinations AI...")
+            import urllib.parse
+            import httpx
+            quoted_prompt = urllib.parse.quote(data.prompt)
+            width, height = data.size.split("x")
+            pollinations_url = f"https://image.pollinations.ai/p/{quoted_prompt}?width={width}&height={height}&nologo=true"
+            try:
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124"
+                }
+                async with httpx.AsyncClient(timeout=30, headers=headers) as client:
+                    resp = await client.get(pollinations_url)
+                    if resp.status_code == 200:
+                        img_bytes = resp.content
+                        used_api = "Pollinations AI"
+                    else:
+                        logger.warning(f"Pollinations AI returned status code {resp.status_code}: {resp.text}")
+            except Exception as poll_err:
+                logger.warning(f"Pollinations AI failed: {poll_err}")
+                
+        # 3. If we got bytes from either API, upload to Cloudinary (or fallback to base64)
+        if img_bytes:
+            try:
+                from services.cloudinary_service import upload_file_to_cloudinary
+                filename = f"gen_{uuid.uuid4().hex}.png"
+                upload_res = await upload_file_to_cloudinary(img_bytes, filename)
+                image_url = upload_res["url"]
+            except Exception as cloud_err:
+                logger.warning(f"Cloudinary upload failed: {cloud_err}. Using base64 fallback.")
+                import base64
+                img_str = base64.b64encode(img_bytes).decode("utf-8")
+                image_url = f"data:image/png;base64,{img_str}"
+                
+            return {
+                "image_url": image_url,
+                "prompt": data.prompt,
+                "search_data": search_data,
+                "note": f"Demo mode powered by {used_api}.",
+                "latency_ms": round((time.time() - start) * 1000, 2),
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Image generation failed: local model failed ({str(img_err)}) and all fallbacks failed."
+            )
 
 
 @router.post("/embed")
