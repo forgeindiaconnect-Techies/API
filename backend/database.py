@@ -113,24 +113,67 @@ async def create_indexes():
     """Create indexes for performance"""
     try:
         await db.users.create_index([("email", ASCENDING)], unique=True)
+    except Exception as e:
+        logger.error(f"Failed to create users index: {e}")
+
+    try:
         await db.datasets.create_index([("user_id", ASCENDING)])
         await db.datasets.create_index([("created_at", DESCENDING)])
+    except Exception as e:
+        logger.error(f"Failed to create datasets indexes: {e}")
+
+    try:
         await db.models.create_index([("user_id", ASCENDING)])
+    except Exception as e:
+        logger.error(f"Failed to create models indexes: {e}")
+
+    try:
         await db.chat_history.create_index([("user_id", ASCENDING)])
         await db.chat_history.create_index([("conversation_id", ASCENDING)])
+    except Exception as e:
+        logger.error(f"Failed to create chat_history indexes: {e}")
+
+    try:
         await db.messages.create_index([("user_id", ASCENDING)])
         await db.messages.create_index([("conversation_id", ASCENDING)])
         await db.messages.create_index([("created_at", DESCENDING)])
         await db.messages.create_index([("user_id", ASCENDING), ("role", ASCENDING), ("created_at", DESCENDING)])
+    except Exception as e:
+        logger.error(f"Failed to create messages indexes: {e}")
+
+    try:
         await db.rag_indexes.create_index([("user_id", ASCENDING)])
         await db.rag_indexes.create_index([("dataset_id", ASCENDING)])
-        await db.api_keys.create_index([("key_hash", ASCENDING)], unique=True)
-        await db.api_keys.create_index([("user_id", ASCENDING)])
-        await db.training_logs.create_index([("job_id", ASCENDING)])
-        await db.analytics.create_index([("user_id", ASCENDING), ("timestamp", DESCENDING)])
-        logger.info("Database indexes created")
     except Exception as e:
-        logger.error(f"Failed to create indexes: {e}")
+        logger.error(f"Failed to create rag_indexes indexes: {e}")
+
+    try:
+        try:
+            await db.api_keys.drop_index("key_hash_1")
+        except Exception:
+            pass
+        await db.api_keys.create_index([("key", ASCENDING)], unique=True, sparse=True)
+        await db.api_keys.create_index([("key_hash", ASCENDING)], unique=True, sparse=True)
+        await db.api_keys.create_index([("user_id", ASCENDING)])
+    except Exception as e:
+        logger.error(f"Failed to create api_keys indexes: {e}")
+
+    try:
+        await db.training_logs.create_index([("job_id", ASCENDING)])
+    except Exception as e:
+        logger.error(f"Failed to create training_logs indexes: {e}")
+
+    try:
+        await db.analytics.create_index([("user_id", ASCENDING), ("timestamp", DESCENDING)])
+    except Exception as e:
+        logger.error(f"Failed to create analytics indexes: {e}")
+
+    try:
+        await db.conversations.create_index([("user_id", ASCENDING)])
+    except Exception as e:
+        logger.error(f"Failed to create conversations indexes: {e}")
+
+    logger.info("Database indexes creation completed")
 
 
 def get_db():

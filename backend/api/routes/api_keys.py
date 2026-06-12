@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from datetime import datetime, timedelta
 import secrets
+import hashlib
 import logging
 from typing import Optional, List
 
@@ -52,8 +53,8 @@ def fmt_key(k: dict, mask: bool = True, raw_key: str = None) -> dict:
         "user_id": k.get("user_id", ""),
         "created_at": created_at,
         "last_used": last_used,
-        "allowed_datasets": k.get("allowed_datasets", []),
-        "allowed_models": k.get("allowed_models", []),
+        "allowed_datasets": [str(x) for x in (k.get("allowed_datasets") or k.get("dataset_ids") or [])],
+        "allowed_models": [str(x) for x in (k.get("allowed_models") or k.get("model_ids") or [])],
     }
 
 
@@ -72,10 +73,12 @@ async def create_api_key(data: ApiKeyCreate, current_user=Depends(get_current_us
     logger.info(f"API Key creation request for user '{current_user.get('email')}' with name: '{data.name}' and rate limit: {data.rate_limit}")
     
     raw_key = "sk-ai_" + secrets.token_urlsafe(24)
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
 
     doc = {
         "name": data.name,
         "key": raw_key,
+        "key_hash": key_hash,
         "scopes": data.scopes,
         "rate_limit": data.rate_limit if data.rate_limit is not None else 10000,
         "request_count": 0,
@@ -149,10 +152,12 @@ async def rotate_api_key(key_id: str, current_user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="API key not found")
 
     raw_key = "sk-ai_" + secrets.token_urlsafe(24)
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     await db.api_keys.update_one(
         query,
         {"$set": {
             "key": raw_key,
+            "key_hash": key_hash,
             "request_count": 0,
             "created_at": datetime.utcnow(),
         }}

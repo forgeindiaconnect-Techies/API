@@ -230,5 +230,7 @@ async def generate_api_key(data: ApiKeyCreate, current_user=Depends(get_current_
         user_id=key_doc["user_id"],
         created_at=key_doc["created_at"],
         expires_at=key_doc.get("expires_at"),
+        allowed_datasets=key_doc.get("allowed_datasets") or [],
+        allowed_models=key_doc.get("allowed_models") or [],
     )
 

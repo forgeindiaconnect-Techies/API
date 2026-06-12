@@ -172,20 +172,51 @@ async def get_dashboard(current_user=Depends(get_current_user)):
                 daily_stats[msg_date]["tokens"] += tokens
 
     # Top models based on active conversations
-    model_counts = {}
-    async for conv in db.conversations.find({"user_id": user_id}):
-        model = conv.get("model", "llama3")
-        model_counts[model] = model_counts.get(model, 0) + 1
-
-    total_convs = sum(model_counts.values())
     top_models = []
-    for model, count in sorted(model_counts.items(), key=lambda x: x[1], reverse=True):
-        percent = round((count / total_convs) * 100, 1) if total_convs > 0 else 0
-        top_models.append({
-            "model": model,
-            "requests": count,
-            "percent": percent
-        })
+    total_convs = 0
+    if hasattr(db.conversations._collection, "aggregate"):
+        try:
+            pipeline_models = [
+                {"$match": {"user_id": user_id}},
+                {"$group": {"_id": {"$ifNull": ["$model", "llama3"]}, "count": {"$sum": 1}}},
+                {"$sort": {"count": -1}}
+            ]
+            cursor = db.conversations.aggregate(pipeline_models)
+            model_results = await cursor.to_list(None)
+            total_convs = sum(row.get("count", 0) for row in model_results)
+            for row in model_results:
+                model_name = row.get("_id") or "llama3"
+                count = row.get("count", 0)
+                percent = round((count / total_convs) * 100, 1) if total_convs > 0 else 0
+                top_models.append({
+                    "model": model_name,
+                    "requests": count,
+                    "percent": percent
+                })
+        except Exception as ae:
+            import logging
+            logging.getLogger(__name__).warning(f"Top models aggregation failed: {ae}")
+            use_fallback_models = True
+        else:
+            use_fallback_models = False
+    else:
+        use_fallback_models = True
+
+    if use_fallback_models:
+        model_counts = {}
+        async for conv in db.conversations.find({"user_id": user_id}):
+            model = conv.get("model", "llama3")
+            model_counts[model] = model_counts.get(model, 0) + 1
+
+        total_convs = sum(model_counts.values())
+        top_models = []
+        for model, count in sorted(model_counts.items(), key=lambda x: x[1], reverse=True):
+            percent = round((count / total_convs) * 100, 1) if total_convs > 0 else 0
+            top_models.append({
+                "model": model,
+                "requests": count,
+                "percent": percent
+            })
 
     # Format daily requests for the last 14 days
     daily_requests = []
