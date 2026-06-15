@@ -149,50 +149,65 @@ class VectorStore:
         else:
             metadatas = [sanitize_metadata(meta) for meta in metadatas]
 
-        if self.backend == "chroma" and self._collection:
-            from services.chroma_service import run_with_retry_async
-            def op():
-                try:
-                    self._collection.add(
-                        documents=documents,
-                        embeddings=embeddings,
-                        metadatas=metadatas,
-                        ids=ids,
-                    )
-                except Exception as add_err:
-                    logger.warning(
-                        f"ChromaDB add failed ({add_err}). Attempting fallback to upsert..."
-                    )
+        batch_size = 100
+        total_added = 0
+        
+        # Batch insertions to prevent SQLite locks and excessive RAM consumption in ChromaDB
+        for idx in range(0, len(documents), batch_size):
+            batch_docs = documents[idx:idx+batch_size]
+            batch_embeddings = embeddings[idx:idx+batch_size]
+            batch_metadatas = metadatas[idx:idx+batch_size]
+            batch_ids = ids[idx:idx+batch_size]
+
+            if self.backend == "chroma" and self._collection:
+                from services.chroma_service import run_with_retry_async
+                def op():
                     try:
-                        self._collection.upsert(
-                            documents=documents,
-                            embeddings=embeddings,
-                            metadatas=metadatas,
-                            ids=ids,
+                        self._collection.add(
+                            documents=batch_docs,
+                            embeddings=batch_embeddings,
+                            metadatas=batch_metadatas,
+                            ids=batch_ids,
                         )
-                    except Exception as upsert_err:
-                        logger.error(f"ChromaDB upsert fallback failed: {upsert_err}")
-                        raise
-            await run_with_retry_async(op)
-        elif self.backend == "faiss" and self._index is not None:
-            import numpy as np
-            import faiss  # type: ignore
-            import json
-            if embeddings and len(embeddings[0]) != self._dimension:
-                self._dimension = len(embeddings[0])
-                self._index = faiss.IndexFlatL2(self._dimension)
-                logger.info(f"Re-initialized FAISS index with dimension {self._dimension}")
-            arr = np.array(embeddings, dtype="float32")
-            self._index.add(arr)
-            self._docs.extend(
-                [{"id": ids[i], "document": documents[i], "metadata": metadatas[i]}
-                 for i in range(len(documents))]
-            )
-            # Persist FAISS to disk
-            faiss.write_index(self._index, self._index_path)
-            with open(self._docs_path, "w", encoding="utf-8") as f:
-                json.dump(self._docs, f, ensure_ascii=False, indent=2)
-        return len(documents)
+                    except Exception as add_err:
+                        logger.warning(
+                            f"ChromaDB add failed ({add_err}). Attempting fallback to upsert..."
+                        )
+                        try:
+                            self._collection.upsert(
+                                documents=batch_docs,
+                                embeddings=batch_embeddings,
+                                metadatas=batch_metadatas,
+                                ids=batch_ids,
+                            )
+                        except Exception as upsert_err:
+                            logger.error(f"ChromaDB upsert fallback failed: {upsert_err}")
+                            raise
+                await run_with_retry_async(op)
+            elif self.backend == "faiss" and self._index is not None:
+                import numpy as np
+                import faiss  # type: ignore
+                import json
+                if batch_embeddings and len(batch_embeddings[0]) != self._dimension:
+                    self._dimension = len(batch_embeddings[0])
+                    self._index = faiss.IndexFlatL2(self._dimension)
+                    logger.info(f"Re-initialized FAISS index with dimension {self._dimension}")
+                arr = np.array(batch_embeddings, dtype="float32")
+                self._index.add(arr)
+                self._docs.extend(
+                    [{"id": batch_ids[i], "document": batch_docs[i], "metadata": batch_metadatas[i]}
+                     for i in range(len(batch_docs))]
+                )
+                # Persist FAISS to disk
+                faiss.write_index(self._index, self._index_path)
+                with open(self._docs_path, "w", encoding="utf-8") as f:
+                    json.dump(self._docs, f, ensure_ascii=False, indent=2)
+            
+            total_added += len(batch_docs)
+            # Yield control back to event loop to allow concurrent polling requests to execute
+            await asyncio.sleep(0.01)
+
+        return total_added
 
     async def query(
         self,

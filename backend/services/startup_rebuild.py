@@ -71,6 +71,7 @@ async def run_startup_recovery():
             logger.info(f"Startup recovery: Cleaned up {stale_datasets.modified_count} stale 'processing' datasets and set their status to 'failed'.")
 
         # Find all datasets with status 'indexed' or 'ready'
+        rebuild_queue = []
         datasets_cursor = db.datasets.find({"status": {"$in": ["indexed", "ready"]}})
         async for dataset in datasets_cursor:
             dataset_id = str(dataset["_id"])
@@ -87,7 +88,7 @@ async def run_startup_recovery():
             index_doc = await db.rag_indexes.find_one({"dataset_id": dataset_id})
             if not index_doc:
                 logger.info(f"No RAG index document found for dataset {dataset_id}. Queueing index rebuild...")
-                dispatch_rebuild_task(dataset_id)
+                rebuild_queue.append(dataset_id)
                 continue
                 
             index_id = str(index_doc["_id"])
@@ -104,13 +105,45 @@ async def run_startup_recovery():
                     {"_id": index_doc["_id"]},
                     {"$set": {"status": "building", "error": None}}
                 )
-                # Dispatch index rebuilding to task queue
-                dispatch_rebuild_task(dataset_id)
+                # Queue index rebuilding
+                rebuild_queue.append(dataset_id)
             else:
                 logger.info(f"Startup recovery: Dataset '{dataset.get('name') or dataset.get('file_name')}' index {index_id} is verified healthy.")
             
             # Cooperative yield to prevent event loop starvation
             await asyncio.sleep(0.1)
+
+        # Dispatch sequential index rebuilding to prevent concurrent SQLite locks
+        if rebuild_queue:
+            logger.info(f"Startup recovery: Found {len(rebuild_queue)} empty vector stores to rebuild sequentially.")
+            asyncio.create_task(run_sequential_rebuilds(rebuild_queue))
                 
     except Exception as e:
         logger.error(f"Error during RAG startup recovery check: {e}")
+
+async def run_sequential_rebuilds(dataset_ids: list):
+    """Rebuild indexes sequentially with warm-up delay to prevent SQLite lock collisions."""
+    logger.info(f"Sequential Rebuild: Waiting 20 seconds warm-up delay before starting {len(dataset_ids)} rebuilds...")
+    await asyncio.sleep(20)
+    
+    db = get_db()
+    if db is None:
+        logger.error("Sequential Rebuild: Database connection not available.")
+        return
+        
+    for dataset_id in dataset_ids:
+        try:
+            logger.info(f"Sequential Rebuild: Starting RAG index rebuilding for dataset {dataset_id}")
+            dataset = await db.datasets.find_one({"_id": get_id_query(dataset_id)})
+            if not dataset:
+                logger.error(f"Sequential Rebuild: Dataset '{dataset_id}' not found in database.")
+                continue
+                
+            # Trigger indexing
+            from services.dataset_service import build_index_for_dataset
+            await build_index_for_dataset(dataset, db)
+            logger.info(f"Sequential Rebuild: Completed RAG index rebuild for dataset: {dataset_id}")
+        except Exception as e:
+            logger.error(f"Sequential Rebuild: Failed for dataset {dataset_id}: {e}")
+        # Yield control between rebuilds to allow other event loop processes to run
+        await asyncio.sleep(1.0)

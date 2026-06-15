@@ -47,15 +47,28 @@ export default function RAGPage() {
     fetchIndexes()
   }, [])
 
-  // Poll indexes if any are building
+  // Poll indexes if any are building with exponential backoff and duplicate request prevention
   useEffect(() => {
-    const buildingIndex = indexes.some(idx => idx.status === 'building')
-    if (!buildingIndex) return
+    const hasBuilding = indexes.some(idx => idx.status === 'building')
+    if (!hasBuilding) return
 
-    const interval = setInterval(async () => {
+    let isMounted = true
+    let timeoutId = null
+    let delay = 5000 // Start with 5s
+    let isPolling = false
+
+    const poll = async () => {
+      if (!isMounted) return
+      if (isPolling) return // Prevent overlapping concurrent requests
+      
+      isPolling = true
       try {
         const { data } = await ragAPI.listIndexes()
+        if (!isMounted) return
+        
         setIndexes(data)
+        delay = 5000 // Reset backoff delay on success
+        
         setSelectedIndex(prev => {
           if (!prev) {
             const readyIdx = data.find(idx => idx.status === 'ready')
@@ -68,12 +81,29 @@ export default function RAGPage() {
           const readyIdx = data.find(idx => idx.status === 'ready')
           return readyIdx ? readyIdx.id : null
         })
+        
+        // Schedule next poll only if there are still active building indexes
+        const stillBuilding = data.some(idx => idx.status === 'building')
+        if (stillBuilding) {
+          timeoutId = setTimeout(poll, delay)
+        }
       } catch (err) {
+        if (!isMounted) return
         console.error('Failed to poll index status', err)
+        // Exponential backoff: multiply delay by 1.5, capped at 30 seconds
+        delay = Math.min(delay * 1.5, 30000)
+        timeoutId = setTimeout(poll, delay)
+      } finally {
+        isPolling = false
       }
-    }, 5000)
+    }
 
-    return () => clearInterval(interval)
+    timeoutId = setTimeout(poll, delay)
+
+    return () => {
+      isMounted = false
+      if (timeoutId) clearTimeout(timeoutId)
+    }
   }, [indexes])
 
   const loadDatasets = async () => {
