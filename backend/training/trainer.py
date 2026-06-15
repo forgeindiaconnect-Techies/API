@@ -154,6 +154,15 @@ async def start_training_job(job_id: str, model_id: str, config: Dict[str, Any],
             await _log(db, job_id, "Dataset not found locally or is non-tabular. Running simulation...")
             await run_simulation(job_id, model_id, config, db)
 
+        # Invalidate cache for either case (tabular training or simulation) upon successful completion
+        try:
+            from api.routes.models_router import invalidate_models_cache
+            model_doc = await db.models.find_one({"_id": get_id_query(model_id)})
+            if model_doc and model_doc.get("user_id"):
+                await invalidate_models_cache(model_doc["user_id"])
+        except Exception as cache_err:
+            logger.error(f"Failed to invalidate cache in training completion: {cache_err}")
+
     except Exception as e:
         logger.error(f"Training job {job_id} failed: {e}")
         await _log(db, job_id, f"Error: {str(e)}", "ERROR")
@@ -165,6 +174,13 @@ async def start_training_job(job_id: str, model_id: str, config: Dict[str, Any],
             {"_id": get_id_query(model_id)},
             {"$set": {"status": "error"}}
         )
+        try:
+            from api.routes.models_router import invalidate_models_cache
+            model_doc = await db.models.find_one({"_id": get_id_query(model_id)})
+            if model_doc and model_doc.get("user_id"):
+                await invalidate_models_cache(model_doc["user_id"])
+        except Exception as cache_err:
+            logger.error(f"Failed to invalidate cache in training failure: {cache_err}")
 
 
 async def _log(db, job_id: str, message: str, level: str = "INFO"):

@@ -43,6 +43,33 @@ async def run_startup_recovery():
             logger.warning("Database not connected, skipping startup RAG index recovery.")
             return
 
+        # Clean up stale "building" indexes: reset them to "failed" with an explanation
+        stale_indexes = await db.rag_indexes.update_many(
+            {"status": "building"},
+            {
+                "$set": {
+                    "status": "failed",
+                    "progress": 0.0,
+                    "error": "Index build was interrupted (server restart or memory limit exceeded)."
+                }
+            }
+        )
+        if stale_indexes.modified_count > 0:
+            logger.info(f"Startup recovery: Cleaned up {stale_indexes.modified_count} stale 'building' indexes and set their status to 'failed'.")
+
+        # Clean up stale "processing" datasets: reset them to "failed" with an explanation
+        stale_datasets = await db.datasets.update_many(
+            {"status": "processing"},
+            {
+                "$set": {
+                    "status": "failed",
+                    "error_message": "Dataset processing was interrupted (server restart or memory limit exceeded)."
+                }
+            }
+        )
+        if stale_datasets.modified_count > 0:
+            logger.info(f"Startup recovery: Cleaned up {stale_datasets.modified_count} stale 'processing' datasets and set their status to 'failed'.")
+
         # Find all datasets with status 'indexed' or 'ready'
         datasets_cursor = db.datasets.find({"status": {"$in": ["indexed", "ready"]}})
         async for dataset in datasets_cursor:

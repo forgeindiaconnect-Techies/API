@@ -1,15 +1,28 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 import logging
+import json
 
 from models import TrainingConfig, TrainingJobResponse, ModelResponse, PredictRequest, PredictResponse
 from auth.utils import get_current_user, verify_key_permissions, get_id_query
 from database import get_db
 from training.trainer import start_training_job
+from redis_client import get_redis
 
 router = APIRouter(prefix="/models", tags=["Models"])
 logger = logging.getLogger(__name__)
+
+
+async def invalidate_models_cache(user_id: str):
+    redis_client = get_redis()
+    if redis_client:
+        try:
+            cache_key = f"models:user:{user_id}"
+            await redis_client.delete(cache_key)
+            logger.info(f"Invalidated models cache for user {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to delete models cache: {e}")
 
 
 def fmt_model(m: dict) -> dict:
@@ -48,19 +61,86 @@ def fmt_job(j: dict) -> dict:
 
 
 @router.get("")
-async def list_models(current_user=Depends(get_current_user)):
+async def list_models(
+    limit: Optional[int] = None,
+    skip: int = 0,
+    current_user=Depends(get_current_user)
+):
+    user_id = str(current_user["_id"])
+    redis_client = get_redis()
+    cache_key = f"models:user:{user_id}"
+    cached_models = None
+    
+    if redis_client:
+        try:
+            cached_data = await redis_client.get(cache_key)
+            if cached_data:
+                cached_models = json.loads(cached_data)
+                logger.info(f"Cache hit: Loaded models for user {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to fetch models cache: {e}")
+            
+    if cached_models is None:
+        db = get_db()
+        models = []
+        async for m in db.models.find({"user_id": user_id}):
+            model_data = fmt_model(m)
+            if model_data["status"] == "training":
+                job = await db.training_jobs.find_one({"model_id": model_data["id"]})
+                if job:
+                    model_data["progress"] = job.get("progress", 0.0)
+                else:
+                    model_data["progress"] = 0.0
+            models.append(model_data)
+        
+        cached_models = sorted(models, key=lambda x: x["created_at"], reverse=True)
+        
+        if redis_client:
+            try:
+                class DateTimeEncoder(json.JSONEncoder):
+                    def default(self, obj):
+                        if isinstance(obj, datetime):
+                            return obj.isoformat()
+                        return super().default(obj)
+                
+                await redis_client.setex(cache_key, 300, json.dumps(cached_models, cls=DateTimeEncoder))
+                logger.info(f"Cached models for user {user_id}")
+            except Exception as e:
+                logger.error(f"Failed to set models cache: {e}")
+                
+    res = cached_models
+    if skip > 0 or limit is not None:
+        start_idx = skip
+        end_idx = (skip + limit) if limit is not None else len(res)
+        res = res[start_idx:end_idx]
+        
+    return res
+
+
+@router.get("/training/progress")
+async def get_all_training_progress(current_user=Depends(get_current_user)):
+    user_id = str(current_user["_id"])
     db = get_db()
-    models = []
-    async for m in db.models.find({"user_id": str(current_user["_id"])}):
-        model_data = fmt_model(m)
-        if model_data["status"] == "training":
-            job = await db.training_jobs.find_one({"model_id": model_data["id"]})
+    progress_map = {}
+    
+    # Active training jobs
+    async for job in db.training_jobs.find({"user_id": user_id, "status": "training"}):
+        progress_map[job["model_id"]] = {
+            "status": "training",
+            "progress": job.get("progress", 0.0)
+        }
+        
+    # Recently updated/completed/failed models that are still transitioning
+    async for m in db.models.find({"user_id": user_id, "status": "training"}):
+        m_id = str(m["_id"])
+        if m_id not in progress_map:
+            job = await db.training_jobs.find_one({"model_id": m_id})
             if job:
-                model_data["progress"] = job.get("progress", 0.0)
-            else:
-                model_data["progress"] = 0.0
-        models.append(model_data)
-    return sorted(models, key=lambda x: x["created_at"], reverse=True)
+                progress_map[m_id] = {
+                    "status": job.get("status", "training"),
+                    "progress": job.get("progress", 0.0)
+                }
+    return progress_map
 
 
 @router.post("/train")
@@ -123,6 +203,9 @@ async def start_training(
     j_result = await db.training_jobs.insert_one(job_doc)
     job_id = str(j_result.inserted_id)
 
+    # Invalidate cache before running background task to reflect training status immediately
+    await invalidate_models_cache(str(current_user["_id"]))
+
     # Start training in background
     background_tasks.add_task(
         start_training_job,
@@ -145,9 +228,19 @@ async def get_training_status(job_id: str, current_user=Depends(get_current_user
 async def stop_training(job_id: str, current_user=Depends(get_current_user)):
     db = get_db()
     await db.training_jobs.update_one(
-        {"_id": get_id_query(job_id)},
+        {"_id": get_id_query(job_id), "user_id": str(current_user["_id"])},
         {"$set": {"status": "stopped", "completed_at": datetime.utcnow()}}
     )
+    
+    # Sync status to corresponding model record
+    job = await db.training_jobs.find_one({"_id": get_id_query(job_id)})
+    if job and job.get("model_id"):
+        await db.models.update_one(
+            {"_id": get_id_query(job["model_id"]), "user_id": str(current_user["_id"])},
+            {"$set": {"status": "stopped"}}
+        )
+        
+    await invalidate_models_cache(str(current_user["_id"]))
     return {"message": "Training stopped"}
 
 
@@ -180,6 +273,7 @@ async def delete_model(model_id: str, current_user=Depends(get_current_user)):
     if not m:
         raise HTTPException(status_code=404, detail="Model not found")
     await db.models.delete_one({"_id": get_id_query(model_id)})
+    await invalidate_models_cache(str(current_user["_id"]))
     return {"message": "Model deleted"}
 
 

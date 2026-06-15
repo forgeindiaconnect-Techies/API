@@ -291,6 +291,7 @@ export const modelAPI = {
   getTrainingStatus: (id) => api.get(`/models/training/${id}`),
   stopTraining: (id) => api.post(`/models/training/${id}/stop`),
   getTrainingLogs: (id) => api.get(`/models/training/${id}/logs`),
+  getTrainingProgress: () => api.get('/models/training/progress'),
   evaluate: (id, data) => api.post(`/models/${id}/evaluate`, data),
   predict: (id, data) => api.post(`/models/${id}/predict`, data),
 }

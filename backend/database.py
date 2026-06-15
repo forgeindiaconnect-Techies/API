@@ -164,6 +164,12 @@ async def create_indexes():
         logger.error(f"Failed to create training_logs indexes: {e}")
 
     try:
+        await db.training_jobs.create_index([("model_id", ASCENDING)])
+        await db.training_jobs.create_index([("user_id", ASCENDING)])
+    except Exception as e:
+        logger.error(f"Failed to create training_jobs indexes: {e}")
+
+    try:
         await db.analytics.create_index([("user_id", ASCENDING), ("timestamp", DESCENDING)])
     except Exception as e:
         logger.error(f"Failed to create analytics indexes: {e}")

@@ -99,6 +99,28 @@ async def initialize_app_bg():
     # 1. Connect to MongoDB
     try:
         await connect_db()
+        # Immediately sync JWT secrets to ensure consistent session signatures across container restarts
+        from database import get_db
+        db = get_db()
+        if db is not None:
+            try:
+                from datetime import datetime
+                config_doc = await db.system_config.find_one({"key": "jwt_secrets"})
+                if config_doc:
+                    settings.SECRET_KEY = config_doc["secret_key"]
+                    settings.JWT_REFRESH_SECRET = config_doc["refresh_secret"]
+                    logger.info("Successfully loaded persistent JWT secrets from MongoDB Atlas.")
+                else:
+                    config_doc = {
+                        "key": "jwt_secrets",
+                        "secret_key": settings.SECRET_KEY,
+                        "refresh_secret": settings.JWT_REFRESH_SECRET,
+                        "created_at": datetime.utcnow()
+                    }
+                    await db.system_config.insert_one(config_doc)
+                    logger.info("Initialized and persisted new JWT secrets to MongoDB Atlas.")
+            except Exception as config_err:
+                logger.error(f"Failed to sync JWT secrets with MongoDB: {config_err}")
     except Exception as e:
         logger.error(f"Startup MongoDB connection failed: {e}")
         
@@ -148,6 +170,11 @@ async def lifespan(app: FastAPI):
     if not init_task.done():
         init_task.cancel()
     await disconnect_db()
+    try:
+        from redis_client import close_redis
+        await close_redis()
+    except Exception as e:
+        logger.error(f"Error during Redis client shutdown: {e}")
     
     # Clean up startup lock
     try:
