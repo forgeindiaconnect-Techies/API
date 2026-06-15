@@ -233,6 +233,8 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             if hasattr(batch_embeds, "tolist"):
                 batch_embeds = batch_embeds.tolist()
             embeddings.extend(batch_embeds)
+            # Yield control back to event loop to allow concurrent HTTP requests to run
+            await asyncio.sleep(0.02)
         logger.info("Embeddings generated")
         
         await db.rag_indexes.update_one(

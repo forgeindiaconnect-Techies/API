@@ -368,7 +368,7 @@ class HashingTFIDFEmbedder:
 
     def encode(self, texts, **kwargs):
         import numpy as np
-        import hashlib
+        import zlib
         import re
 
         is_single = isinstance(texts, str)
@@ -387,9 +387,9 @@ class HashingTFIDFEmbedder:
 
             vec = np.zeros(self.dimension, dtype="float32")
             for w, freq in tf.items():
-                h = int(hashlib.md5(w.encode("utf-8")).hexdigest(), 16)
+                h = zlib.crc32(w.encode("utf-8"))
                 idx = h % self.dimension
-                sign = 1 if ((h >> 8) & 1) else -1
+                sign = 1 if (h & 256) else -1
                 vec[idx] += sign * freq
 
             norm = np.linalg.norm(vec)
