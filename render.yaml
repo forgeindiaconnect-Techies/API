@@ -40,6 +40,14 @@ services:
         sync: false # OpenAI fallback token (highly recommended for production fallback)
       - key: GEMINI_API_KEY
         sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: CLOUDINARY_URL
+        sync: false
       - key: JWT_SECRET
         sync: false
       - key: JWT_REFRESH_SECRET
@@ -89,6 +97,14 @@ services:
       - key: OPENAI_API_KEY
         sync: false
       - key: GEMINI_API_KEY
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: CLOUDINARY_URL
         sync: false
       - key: JWT_SECRET
         sync: false
