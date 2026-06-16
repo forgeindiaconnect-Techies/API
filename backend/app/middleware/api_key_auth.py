@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from datetime import datetime
 from pymongo import ReturnDocument
 import logging
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -11,11 +12,7 @@ class APIKeyAuthMiddleware:
     """
     ASGI middleware for validating sk-ai_ API keys on public endpoints.
     """
-    ALLOWED_ORIGINS = [
-        "https://d-ai-nu.vercel.app",
-        "http://localhost:3000",
-        "http://localhost:5173",
-    ]
+    ALLOWED_ORIGINS = settings.allowed_origins_list
 
     def __init__(self, app):
         self.app = app
@@ -27,7 +24,7 @@ class APIKeyAuthMiddleware:
             if origin in self.ALLOWED_ORIGINS or (origin.startswith("https://") and origin.endswith(".vercel.app")):
                 resolved_origin = origin
         if not resolved_origin:
-            resolved_origin = "https://d-ai-nu.vercel.app"
+            resolved_origin = self.ALLOWED_ORIGINS[0] if self.ALLOWED_ORIGINS else "*"
         cors_headers["Access-Control-Allow-Origin"] = resolved_origin
         cors_headers["Access-Control-Allow-Credentials"] = "true"
         cors_headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, HEAD"

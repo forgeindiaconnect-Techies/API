@@ -173,7 +173,7 @@ async def ensure_dataset_indexed(dataset_id: str, db) -> str:
 
 @router.options("/conversations/{conversation_id}/stream")
 async def options_stream_message(conversation_id: str, response: Response):
-    response.headers["Access-Control-Allow-Origin"] = "https://d-ai-nu.vercel.app"
+    response.headers["Access-Control-Allow-Origin"] = settings.allowed_origins_list[0] if settings.allowed_origins_list else "*"
     response.headers["Access-Control-Allow-Credentials"] = "true"
     response.headers["Access-Control-Allow-Headers"] = "*"
     response.headers["Access-Control-Allow-Methods"] = "*"
@@ -247,11 +247,7 @@ async def stream_message(
             yield "data: [DONE]\n\n"
 
     origin = request.headers.get("origin") if request is not None else None
-    allowed_origins = [
-        "https://d-ai-nu.vercel.app",
-        "http://localhost:3000",
-        "http://localhost:5173"
-    ]
+    allowed_origins = settings.allowed_origins_list
     
     response = StreamingResponse(generate_response(), media_type="text/event-stream")
     
@@ -268,7 +264,7 @@ async def stream_message(
     if is_allowed:
         response.headers["Access-Control-Allow-Origin"] = origin
     else:
-        response.headers["Access-Control-Allow-Origin"] = "https://d-ai-nu.vercel.app"
+        response.headers["Access-Control-Allow-Origin"] = allowed_origins[0] if allowed_origins else "*"
         
     response.headers["Access-Control-Allow-Credentials"] = "true"
     response.headers["Access-Control-Allow-Headers"] = "*"

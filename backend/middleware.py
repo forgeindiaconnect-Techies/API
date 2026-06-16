@@ -7,6 +7,7 @@ from auth.utils import decode_token
 from database import get_db
 from bson import ObjectId
 from bson.errors import InvalidId
+from config import settings
 
 
 logger = logging.getLogger(__name__)
@@ -52,12 +53,8 @@ class RequestLoggingMiddleware:
                 has_cors = any(h[0].lower() == b"access-control-allow-origin" for h in response_headers)
                 
                 if not has_cors:
-                    allowed_origins = [
-                        "https://d-ai-nu.vercel.app",
-                        "http://localhost:3000",
-                        "http://localhost:5173"
-                    ]
-                    resolved_origin = "https://d-ai-nu.vercel.app"
+                    allowed_origins = settings.allowed_origins_list
+                    resolved_origin = allowed_origins[0] if allowed_origins else "*"
                     if origin:
                         if origin in allowed_origins or (origin.startswith("https://") and origin.endswith(".vercel.app")):
                             resolved_origin = origin
@@ -97,11 +94,7 @@ class AuthMiddleware:
     Bypasses preflight OPTIONS and public endpoints.
     Avoids BaseHTTPMiddleware to prevent stream-blocking issues in SSE endpoints.
     """
-    ALLOWED_ORIGINS = [
-        "https://d-ai-nu.vercel.app",
-        "http://localhost:3000",
-        "http://localhost:5173",
-    ]
+    ALLOWED_ORIGINS = settings.allowed_origins_list
 
     def __init__(self, app):
         self.app = app
@@ -114,7 +107,7 @@ class AuthMiddleware:
             if origin in self.ALLOWED_ORIGINS or (origin.startswith("https://") and origin.endswith(".vercel.app")):
                 resolved_origin = origin
         if not resolved_origin:
-            resolved_origin = "https://d-ai-nu.vercel.app"
+            resolved_origin = self.ALLOWED_ORIGINS[0] if self.ALLOWED_ORIGINS else "*"
         cors_headers["Access-Control-Allow-Origin"] = resolved_origin
         cors_headers["Access-Control-Allow-Credentials"] = "true"
         cors_headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, HEAD"

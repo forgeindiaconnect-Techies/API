@@ -216,11 +216,7 @@ app.add_middleware(RequestLoggingMiddleware)
 # 4. CORSMiddleware (outer-most, handles preflight OPTIONS requests directly)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://d-ai-nu.vercel.app",
-        "http://localhost:3000",
-        "http://localhost:5173"
-    ],
+    allow_origins=settings.allowed_origins_list,
     allow_origin_regex="https://.*\\.vercel\\.app",
     allow_credentials=True,
     allow_methods=["*"],
@@ -231,18 +227,14 @@ app.add_middleware(
 
 # ─── Exception Handlers ───────────────────────────────────────────────────────
 
-ALLOWED_ORIGINS = [
-    "https://d-ai-nu.vercel.app",
-    "http://localhost:3000",
-    "http://localhost:5173",
-]
+ALLOWED_ORIGINS = settings.allowed_origins_list
 
 def _cors_headers(request: Request) -> dict:
     origin = request.headers.get("origin", "")
     if origin in ALLOWED_ORIGINS or (origin.startswith("https://") and origin.endswith(".vercel.app")):
         resolved = origin
     else:
-        resolved = "https://d-ai-nu.vercel.app"
+        resolved = ALLOWED_ORIGINS[0] if ALLOWED_ORIGINS else "*"
     return {
         "Access-Control-Allow-Origin": resolved,
         "Access-Control-Allow-Credentials": "true",
