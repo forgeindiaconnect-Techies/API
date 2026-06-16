@@ -126,11 +126,20 @@ class AuthMiddleware:
             await self.app(scope, receive, send)
             return
 
+        if "state" not in scope:
+            scope["state"] = {}
+
         request = Request(scope, receive=receive)
         origin = request.headers.get("origin")
 
         # 1. Bypass OPTIONS preflight requests completely
         if request.method == "OPTIONS":
+            await self.app(scope, receive, send)
+            return
+
+        # 1.5 Bypass if already authenticated by APIKeyAuthMiddleware
+        state = scope.get("state")
+        if isinstance(state, dict) and ("api_key" in state or "api_key_doc" in state):
             await self.app(scope, receive, send)
             return
 
@@ -148,6 +157,8 @@ class AuthMiddleware:
             "/api/v1/auth/register",
             "/api/v1/auth/refresh",
             "/api/v1/info",
+            "/api/v1/test-gemini",
+            "/api/v1/test-embedder",
         ]
         
         if path in public_paths or path.startswith("/api/docs") or path.startswith("/api/openapi"):
@@ -208,8 +219,9 @@ class AuthMiddleware:
                         await response(scope, receive, send)
                         return
 
-                # Check rate limit
-                if key_doc.get("requests_count", 0) >= key_doc.get("rate_limit", 1000):
+                # Check rate limit using both count fields
+                request_count = key_doc.get("request_count") or key_doc.get("requests_count") or 0
+                if request_count >= key_doc.get("rate_limit", 1000):
                     logger.warning("AuthMiddleware: API Key rate limit exceeded")
                     response = self._cors_response(origin, 429, {"detail": "Rate limit exceeded for this API key"})
                     await response(scope, receive, send)
@@ -220,7 +232,16 @@ class AuthMiddleware:
                 now_utc = datetime.now(timezone.utc)
                 await db.api_keys.update_one(
                     {"_id": key_doc["_id"]},
-                    {"$set": {"last_used": now_utc, "last_used_at": now_utc}, "$inc": {"requests_count": 1}}
+                    {
+                        "$set": {
+                            "last_used": now_utc,
+                            "last_used_at": now_utc
+                        },
+                        "$inc": {
+                            "request_count": 1,
+                            "requests_count": 1
+                        }
+                    }
                 )
             else:
                 payload = decode_token(token, expected_type="access")

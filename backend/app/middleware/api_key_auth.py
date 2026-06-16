@@ -39,6 +39,9 @@ class APIKeyAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
+        if "state" not in scope:
+            scope["state"] = {}
+
         request = Request(scope, receive=receive)
         path = request.url.path
         origin = request.headers.get("origin")
@@ -56,7 +59,8 @@ class APIKeyAuthMiddleware:
             "/api/transcribe", "/api/v1/transcribe",
             "/api/generate-image", "/api/v1/generate-image",
             "/api/image-generate", "/api/v1/image-generate",
-            "/api/rag", "/api/v1/rag"
+            "/api/rag", "/api/v1/rag",
+            "/api/ai", "/api/v1/ai"
         ]
 
         is_protected = any(path == p or path.startswith(p + "/") for p in protected_prefixes)
@@ -93,15 +97,23 @@ class APIKeyAuthMiddleware:
             await response(scope, receive, send)
             return
 
-        # 2. Query MongoDB api_keys
-        key_doc = await db.api_keys.find_one({"key": api_key, "is_active": True})
+        # 2. Query MongoDB api_keys by key_hash
+        import hashlib
+        key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+        key_doc = await db.api_keys.find_one({
+            "key_hash": key_hash,
+            "$or": [
+                {"is_active": True},
+                {"is_active": {"$exists": False}, "status": "active"}
+            ]
+        })
         if not key_doc:
             response = self._cors_response(origin, 401, {"detail": "Invalid or inactive API key"})
             await response(scope, receive, send)
             return
 
         # 3. Check rate limit
-        request_count = key_doc.get("request_count", 0)
+        request_count = key_doc.get("request_count") or key_doc.get("requests_count") or 0
         rate_limit = key_doc.get("rate_limit", 10000)
         if request_count >= rate_limit:
             response = self._cors_response(origin, 429, {"detail": "Rate limit exceeded"})
@@ -130,19 +142,22 @@ class APIKeyAuthMiddleware:
             return
 
         # 5. Check allowed_datasets
-        allowed_datasets = key_doc.get("allowed_datasets")
+        allowed_datasets = key_doc.get("allowed_datasets") or key_doc.get("dataset_ids")
         scope["state"] = scope.get("state", {})
         if allowed_datasets and len(allowed_datasets) > 0:
             scope["state"]["allowed_datasets"] = allowed_datasets
         else:
             scope["state"]["allowed_datasets"] = None
 
-        # 6. On success: increment count and update last_used
+        # 6. On success: increment count and update last_used (both request_count and requests_count)
         updated_doc = await db.api_keys.find_one_and_update(
             {"_id": key_doc["_id"]},
             {
-                "$inc": {"request_count": 1},
-                "$set": {"last_used": datetime.utcnow()}
+                "$inc": {"request_count": 1, "requests_count": 1},
+                "$set": {
+                    "last_used": datetime.utcnow(),
+                    "last_used_at": datetime.utcnow()
+                }
             },
             return_document=ReturnDocument.AFTER
         )
@@ -163,5 +178,12 @@ class APIKeyAuthMiddleware:
             user_doc = await db.users.find_one(user_query)
             if user_doc:
                 scope["state"]["user"] = user_doc
+
+        client_host = request.client.host if request.client else "unknown"
+        logger.info(
+            f"API Key Authenticated: name='{updated_doc.get('name')}', "
+            f"prefix='{updated_doc.get('key_prefix') or api_key[:12]}', "
+            f"path='{path}', client='{client_host}'"
+        )
 
         await self.app(scope, receive, send)

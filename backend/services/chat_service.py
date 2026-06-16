@@ -215,7 +215,35 @@ Generate a natural language response."""
     else:
         logger.info("Ollama is cached offline. Skipping connection attempt and trying fallbacks immediately.")
         
-    # B: Try OpenAI fallback if Ollama is unavailable
+    # B: Try Google Gemini fallback if Ollama is unavailable
+    if not llm_connected:
+        if settings.GEMINI_API_KEY and not settings.GEMINI_API_KEY.startswith("your-"):
+            try:
+                logger.info("Attempting Google Gemini fallback (gemini-2.5-flash)...")
+                import google.generativeai as genai
+                genai.configure(api_key=settings.GEMINI_API_KEY)
+                model_instance = genai.GenerativeModel("gemini-2.5-flash")
+                
+                try:
+                    logger.info("Calling Gemini API asynchronously...")
+                    res = await model_instance.generate_content_async(prompt)
+                    answer_text = res.text.strip()
+                except Exception as gemini_async_err:
+                    logger.warning(f"Gemini async call failed: {gemini_async_err}. Trying synchronous call in executor...")
+                    res = await asyncio.to_thread(model_instance.generate_content, prompt)
+                    answer_text = res.text.strip()
+                
+                if answer_text:
+                    llm_connected = True
+                    logger.info("LLM response status: Success (Gemini)")
+                    logger.info("✓ LLM response received")
+            except Exception as gemini_err:
+                logger.error(f"Google Gemini fallback failed for RAG: {gemini_err}")
+                logger.info(f"LLM response status: Failed (Gemini error: {gemini_err})")
+        else:
+            logger.info("LLM response status: GEMINI_API_KEY is missing or placeholder. Skipping Gemini fallback.")
+
+    # C: Try OpenAI fallback if Gemini is unavailable or fails
     if not llm_connected:
         if settings.OPENAI_API_KEY and not settings.OPENAI_API_KEY.startswith("sk-..."):
             try:
@@ -236,7 +264,7 @@ Generate a natural language response."""
         else:
             logger.info("LLM response status: OpenAI API key is missing or invalid. Skipping OpenAI fallback.")
 
-    # C: If both are unavailable, fall back to Dataset-Only RAG Mode with natural language responder
+    # D: If all are unavailable, fall back to Dataset-Only RAG Mode with natural language responder
     if not llm_connected:
         logger.info("LLM response status: Fallback (Offline contextual responder)")
         answer_text = generate_fallback_answer(question, valid_sources)

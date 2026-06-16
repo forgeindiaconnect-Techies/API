@@ -175,8 +175,9 @@ async def get_current_user(
                         headers={"WWW-Authenticate": "Bearer"},
                     )
 
-            # Check rate limit
-            if key_doc.get("requests_count", 0) >= key_doc.get("rate_limit", 1000):
+            # Check rate limit using both count fields
+            request_count = key_doc.get("request_count") or key_doc.get("requests_count") or 0
+            if request_count >= key_doc.get("rate_limit", 1000):
                 logger.warning("get_current_user: API Key rate limit exceeded")
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -188,7 +189,16 @@ async def get_current_user(
             now_utc = datetime.now(timezone.utc)
             await db.api_keys.update_one(
                 {"_id": key_doc["_id"]},
-                {"$set": {"last_used": now_utc, "last_used_at": now_utc}, "$inc": {"requests_count": 1}}
+                {
+                    "$set": {
+                        "last_used": now_utc,
+                        "last_used_at": now_utc
+                    },
+                    "$inc": {
+                        "request_count": 1,
+                        "requests_count": 1
+                    }
+                }
             )
         else:
             payload = decode_token(token, expected_type="access")
@@ -278,11 +288,20 @@ async def verify_api_key(api_key: str) -> Optional[Dict]:
     if not key_doc:
         return None
 
-    # Update last_used
+    # Update last_used (both request_count and requests_count)
     now_utc = datetime.now(timezone.utc)
     await db.api_keys.update_one(
         {"_id": key_doc["_id"]},
-        {"$set": {"last_used": now_utc, "last_used_at": now_utc}, "$inc": {"requests_count": 1}}
+        {
+            "$set": {
+                "last_used": now_utc,
+                "last_used_at": now_utc
+            },
+            "$inc": {
+                "request_count": 1,
+                "requests_count": 1
+            }
+        }
     )
     return key_doc
 

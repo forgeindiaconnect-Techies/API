@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     DEFAULT_MODEL: str = "llama3"
     OPENAI_API_KEY: str = ""
+    GEMINI_API_KEY: str = ""
     HUGGINGFACE_TOKEN: str = Field(
         default="",
         validation_alias=AliasChoices("HUGGINGFACE_TOKEN", "HF_TOKEN")

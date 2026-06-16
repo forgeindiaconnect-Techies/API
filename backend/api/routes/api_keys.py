@@ -15,6 +15,15 @@ router = APIRouter(tags=["API Keys"])
 logger = logging.getLogger(__name__)
 
 
+def generate_api_key():
+    import secrets
+    import hashlib
+    raw_key = "sk-ai_" + secrets.token_urlsafe(24)
+    prefix = raw_key[:12]
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    return raw_key, prefix, key_hash
+
+
 def fmt_key(k: dict, mask: bool = True, raw_key: str = None) -> dict:
     created_at = k.get("created_at")
     if isinstance(created_at, str):
@@ -40,16 +49,21 @@ def fmt_key(k: dict, mask: bool = True, raw_key: str = None) -> dict:
         if full_key:
             key_value = full_key[:12] + "••••••••"
         else:
-            key_value = "••••••••••••"
+            prefix = k.get("key_prefix")
+            if prefix:
+                key_value = prefix + "••••••••"
+            else:
+                key_value = "••••••••••••"
 
     return {
         "id": str(k["_id"]),
         "name": k.get("name"),
         "key": key_value,
+        "key_prefix": k.get("key_prefix") or (raw_key[:12] if raw_key else (k.get("key")[:12] if k.get("key") else None)),
         "scopes": k.get("scopes", ["chat"]),
         "rate_limit": k.get("rate_limit", 10000),
-        "request_count": k.get("request_count", 0),
-        "is_active": k.get("is_active", True),
+        "request_count": k.get("request_count") or k.get("requests_count") or 0,
+        "is_active": k.get("is_active", True) or (k.get("status") == "active"),
         "user_id": k.get("user_id", ""),
         "created_at": created_at,
         "last_used": last_used,
@@ -181,7 +195,7 @@ async def get_key_usage(key_id: str, current_user=Depends(get_current_user)):
     if not k:
         raise HTTPException(status_code=404, detail="API key not found")
 
-    reqs = k.get("request_count", 0)
+    reqs = k.get("request_count") or k.get("requests_count") or 0
     now = datetime.utcnow()
     daily_usage = []
     for i in range(7):

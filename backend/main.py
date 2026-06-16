@@ -10,7 +10,7 @@ import time
 import asyncio
 
 from config import settings
-from database import connect_db, disconnect_db
+from database import connect_db, disconnect_db, get_db
 from middleware import AuthMiddleware, RequestLoggingMiddleware
 from app.middleware.api_key_auth import APIKeyAuthMiddleware
 from api.routes.auth import router as auth_router
@@ -377,6 +377,61 @@ async def test_embedder():
         "disable_local_env": os.environ.get("DISABLE_LOCAL_EMBEDDINGS") == "true",
         "openai_key_configured": bool(settings.OPENAI_API_KEY and not settings.OPENAI_API_KEY.startswith("sk-..."))
     }
+
+
+@app.get("/api/v1/test-gemini")
+async def test_gemini():
+    """Test Gemini API connectivity and return status or detailed error"""
+    if not settings.GEMINI_API_KEY:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "error",
+                "message": "GEMINI_API_KEY is not configured in settings/environment",
+                "details": "Please set GEMINI_API_KEY in your .env file or environment settings."
+            }
+        )
+    if settings.GEMINI_API_KEY.startswith("your-"):
+         return JSONResponse(
+            status_code=400,
+            content={
+                "status": "error",
+                "message": "GEMINI_API_KEY is configured with a placeholder value",
+                "details": f"The configured key starts with '{settings.GEMINI_API_KEY[:8]}'. Please replace it with a valid Google Gemini API Key."
+            }
+        )
+        
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=settings.GEMINI_API_KEY)
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        
+        # Test content generation with a very small prompt
+        import asyncio
+        try:
+            res = await model.generate_content_async("Respond with exactly: 'Gemini is connected!'")
+            text = res.text.strip()
+        except Exception as async_err:
+            logger.warning(f"Async test failed: {async_err}. Trying sync fallback...")
+            res = await asyncio.to_thread(model.generate_content, "Respond with exactly: 'Gemini is connected!'")
+            text = res.text.strip()
+            
+        return {
+            "status": "connected",
+            "message": "Successfully connected to Google Gemini API",
+            "model": "gemini-2.5-flash",
+            "response": text
+        }
+    except Exception as e:
+        logger.error(f"Gemini test connectivity failed: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "failed",
+                "message": "Failed to connect to Google Gemini API",
+                "details": str(e)
+            }
+        )
 
 
 # ─── Generated Inference Endpoints ────────────────────────────────────────────
