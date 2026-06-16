@@ -153,8 +153,25 @@ async def ensure_dataset_indexed(dataset_id: str, db) -> str:
     if not dataset:
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_id} not found")
 
+    # If the dataset has failed, raise a detailed error
+    if dataset.get("status") == "failed":
+        err_msg = dataset.get("error_message") or "Unknown indexing failure."
+        raise HTTPException(
+            status_code=400,
+            detail=f"Grounding context indexing failed: {err_msg}. Please delete the dataset and re-upload the file."
+        )
+
+    # Check if any index document failed
+    index_doc = await db.rag_indexes.find_one({"dataset_id": dataset_id})
+    if index_doc and index_doc.get("status") == "failed":
+        err_msg = index_doc.get("error") or dataset.get("error_message") or "Unknown indexing failure."
+        raise HTTPException(
+            status_code=400,
+            detail=f"Grounding context indexing failed: {err_msg}. Please delete the dataset and re-upload the file."
+        )
+
     # If the index is already building/processing, raise a clean error
-    if dataset.get("status") == "processing":
+    if dataset.get("status") in ("processing", "building") or (index_doc and index_doc.get("status") in ("processing", "building", "indexing")):
         raise HTTPException(
             status_code=400,
             detail="This dataset is currently being indexed. Please try again in a few seconds."
@@ -169,6 +186,7 @@ async def ensure_dataset_indexed(dataset_id: str, db) -> str:
         status_code=400,
         detail="Grounding context is not ready. Indexing has been started in the background. Please try again in a few seconds."
     )
+
 
 
 @router.options("/conversations/{conversation_id}/stream")
