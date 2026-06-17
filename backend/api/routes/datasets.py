@@ -166,7 +166,7 @@ async def upload_dataset(
         "name": file.filename,
         "file_type": ext,
         "size_bytes": file_size,
-        "status": "processing",
+        "status": "pending",
         "user_id": str(current_user["_id"]),
         "created_at": datetime.utcnow(),
     }
@@ -189,6 +189,9 @@ async def upload_dataset(
     # 4. Define background task for Cloudinary upload & RAG indexing
     async def process_upload_and_index_bg(dataset_doc: dict, file_content: bytes, filename: str, path: str):
         try:
+            db_instance = get_db()
+            
+            # 1. Cloudinary upload
             cloudinary_res = None
             if settings.CLOUDINARY_CLOUD_NAME and settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET:
                 try:
@@ -199,16 +202,42 @@ async def upload_dataset(
                 except Exception as upload_err:
                     logger.warning(f"Background: Cloudinary upload failed: {upload_err}. Staying with local path.")
 
-            db_instance = get_db()
+            # 2. GridFS upload (as a robust database persistence backup)
+            gridfs_id = None
+            try:
+                logger.info(f"Background: Backing up {filename} to GridFS...")
+                from services.dataset_service import upload_file_to_gridfs
+                ext = filename.split(".")[-1].lower()
+                content_type = "application/octet-stream"
+                if ext == "txt":
+                    content_type = "text/plain"
+                elif ext == "csv":
+                    content_type = "text/csv"
+                elif ext == "pdf":
+                    content_type = "application/pdf"
+                elif ext == "json":
+                    content_type = "application/json"
+                
+                gridfs_id = await upload_file_to_gridfs(file_content, filename, content_type)
+            except Exception as gridfs_err:
+                logger.error(f"Background: GridFS backup failed: {gridfs_err}")
+
+            # Update DB document with Cloudinary URL and GridFS ID
+            updates = {}
             if cloudinary_res:
                 dataset_doc["cloudinary_url"] = cloudinary_res["url"]
                 dataset_doc["public_id"] = cloudinary_res["public_id"]
+                updates["cloudinary_url"] = cloudinary_res["url"]
+                updates["public_id"] = cloudinary_res["public_id"]
+                
+            if gridfs_id:
+                dataset_doc["gridfs_id"] = gridfs_id
+                updates["gridfs_id"] = gridfs_id
+
+            if updates:
                 await db_instance.datasets.update_one(
                     {"_id": ObjectId(dataset_doc["_id"])},
-                    {"$set": {
-                        "cloudinary_url": cloudinary_res["url"],
-                        "public_id": cloudinary_res["public_id"]
-                    }}
+                    {"$set": updates}
                 )
             
             # Index the dataset
@@ -298,6 +327,17 @@ async def delete_dataset(dataset_id: str, current_user=Depends(get_current_user)
             logger.info(f"Deleted Cloudinary file {public_id} for dataset {dataset_id}")
         except Exception as e:
             logger.error(f"Failed to delete Cloudinary file {public_id}: {e}")
+
+    # 3.5 Delete from GridFS
+    gridfs_id = d.get("gridfs_id")
+    if gridfs_id:
+        try:
+            from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+            fs = AsyncIOMotorGridFSBucket(db._db)
+            await fs.delete(ObjectId(gridfs_id))
+            logger.info(f"Deleted GridFS file {gridfs_id} for dataset {dataset_id}")
+        except Exception as e:
+            logger.error(f"Failed to delete GridFS file {gridfs_id}: {e}")
 
     # 4. Delete the dataset document from MongoDB
     await db.datasets.delete_one({"_id": d["_id"]})
@@ -407,56 +447,9 @@ async def reprocess_dataset(
         
     await db.datasets.update_one({"_id": d["_id"]}, {"$set": {"status": "processing", "error_message": None}})
     
-    async def do_reprocess_bg(dataset_doc: dict):
-        temp_path = None
-        is_temp = False
-        try:
-            from services.dataset_service import get_dataset_file
-            from datasets.processor import _process_sync, _eda_sync
-            
-            # 1. Download/get dataset file
-            temp_path, is_temp = await get_dataset_file(dataset_doc)
-            
-            # 2. Extract metadata, EDA, and preview
-            meta_res = await asyncio.to_thread(_process_sync, temp_path, dataset_doc.get("file_type", ""))
-            eda_res = await asyncio.to_thread(_eda_sync, temp_path, dataset_doc.get("file_type", ""))
-            preview_res = await asyncio.to_thread(_generate_preview, temp_path, dataset_doc.get("file_type", ""))
-            
-            # 3. Update MongoDB with completed status and all fields
-            rows = meta_res.get("rows")
-            cols = meta_res.get("cols")
-            columns = meta_res.get("columns", [])
-            
-            update_doc = {
-                "status": "completed",
-                "rows": rows,
-                "cols": cols,
-                "row_count": rows,
-                "columns": columns,
-                "stats": eda_res,
-                "preview": preview_res,
-                "processed_at": datetime.utcnow(),
-                "error_message": None
-            }
-            
-            db_instance = get_db()
-            await db_instance.datasets.update_one({"_id": ObjectId(dataset_doc["_id"])}, {"$set": update_doc})
-            logger.info(f"Reprocessing completed successfully for dataset {dataset_doc['_id']}")
-        except Exception as e:
-            logger.error(f"Reprocessing background task failed for dataset {dataset_doc['_id']}: {e}", exc_info=True)
-            db_instance = get_db()
-            await db_instance.datasets.update_one(
-                {"_id": ObjectId(dataset_doc["_id"])},
-                {"$set": {"status": "failed", "error_message": str(e)}}
-            )
-        finally:
-            if temp_path and is_temp and os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except Exception as clean_err:
-                    logger.error(f"Failed to remove temp file {temp_path}: {clean_err}")
-
-    background_tasks.add_task(do_reprocess_bg, d)
+    # Reprocessing a failed/completed dataset should rebuild its RAG index as well to make it fully functional.
+    from services.dataset_service import build_index_for_dataset
+    background_tasks.add_task(build_index_for_dataset, d, db)
     
     # Return formatted info immediately with status 'processing'
     d["status"] = "processing"
@@ -488,7 +481,11 @@ async def get_dataset_status(
     else:
         progress = 10
         
-    return {"status": status, "progress": progress}
+    return {
+        "status": status,
+        "progress": progress,
+        "error_message": d.get("error_message")
+    }
 
 
 @router.get("/{dataset_id}/eda")

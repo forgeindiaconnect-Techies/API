@@ -119,9 +119,69 @@ async def extract_text_from_file(file_path: str, file_type: str) -> list:
         raise Exception(f"File type {file_type} not indexable")
     return chunks
 
+async def upload_file_to_gridfs(file_bytes: bytes, filename: str, content_type: str = "application/octet-stream") -> str:
+    """Upload file bytes to MongoDB GridFS and return the string gridfs_id."""
+    from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+    import io
+    
+    db = get_db()
+    if db is None or (hasattr(db, "_db") and db._db.__class__.__name__ == "MockDB"):
+        logger.warning("GridFS: Database is MockDB or unavailable. Skipping GridFS upload.")
+        return ""
+        
+    try:
+        raw_db = db._db
+        fs = AsyncIOMotorGridFSBucket(raw_db)
+        stream = io.BytesIO(file_bytes)
+        gridfs_id = await fs.upload_from_stream(
+            filename,
+            stream,
+            metadata={"content_type": content_type}
+        )
+        logger.info(f"Successfully uploaded {filename} to GridFS with ID: {gridfs_id}")
+        return str(gridfs_id)
+    except Exception as e:
+        logger.error(f"Failed to upload file to GridFS: {e}", exc_info=True)
+        return ""
+
+async def download_file_from_gridfs(dataset_doc: dict) -> str:
+    """Download a file from MongoDB GridFS to a local temporary file path and return the path."""
+    from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+    from bson import ObjectId
+    
+    db = get_db()
+    if db is None or (hasattr(db, "_db") and db._db.__class__.__name__ == "MockDB"):
+        raise Exception("GridFS download failed: Database is MockDB or unavailable")
+        
+    gridfs_id = dataset_doc.get("gridfs_id")
+    if not gridfs_id:
+        raise Exception("No gridfs_id found in dataset document")
+        
+    try:
+        raw_db = db._db
+        fs = AsyncIOMotorGridFSBucket(raw_db)
+        
+        # Determine suffix
+        suffix = "." + dataset_doc.get("file_type", "txt").lower()
+        
+        # Create named temporary file (closed immediately so we can write to it)
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        temp_path = temp_file.name
+        temp_file.close()
+        
+        # Open in write-binary mode
+        with open(temp_path, "wb") as f:
+            await fs.download_to_stream(ObjectId(gridfs_id), f)
+            
+        logger.info(f"Successfully downloaded GridFS ID {gridfs_id} to temp path {temp_path}")
+        return temp_path
+    except Exception as e:
+        logger.error(f"Failed to download file from GridFS: {e}", exc_info=True)
+        raise
+
 async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
     """Get the file path for the dataset. If cloudinary_url is present, download it.
-    Otherwise, fallback to local file_path if it exists. Returns (path, is_temp)."""
+    Otherwise, fallback to local file_path if it exists. Then try GridFS backup. Returns (path, is_temp)."""
     cloudinary_url = dataset_doc.get("cloudinary_url")
     if cloudinary_url:
         try:
@@ -143,8 +203,47 @@ async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
             if os.path.exists(p) and os.path.isfile(p):
                 logger.info(f"Found local file at: {p}")
                 return p, False
+
+    # Check GridFS backup
+    gridfs_id = dataset_doc.get("gridfs_id")
+    if gridfs_id:
+        try:
+            logger.info(f"Downloading dataset from GridFS (ID: {gridfs_id})...")
+            temp_path = await download_file_from_gridfs(dataset_doc)
+            return temp_path, True
+        except Exception as e:
+            logger.error(f"Failed to download from GridFS: {e}")
                 
-    raise Exception("Dataset file could not be found locally or downloaded from Cloudinary")
+    raise Exception("Dataset file could not be found locally, downloaded from Cloudinary, or retrieved from GridFS")
+
+
+def validate_environment_variables():
+    """Validate all crucial environment variables and print structured info log with masked values."""
+    from config import settings
+    vars_to_check = {
+        "MONGODB_URL": settings.MONGODB_URL or os.environ.get("MONGODB_URI"),
+        "OPENAI_API_KEY": settings.OPENAI_API_KEY or os.environ.get("OPENAI_API_KEY"),
+        "GEMINI_API_KEY": settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY"),
+        "HUGGINGFACE_TOKEN/API_KEY": settings.HUGGINGFACE_TOKEN or os.environ.get("HUGGINGFACE_API_KEY"),
+        "CHROMA_URL": os.environ.get("CHROMA_URL") or os.environ.get("CHROMA_SERVER_HOST") or f"Local Persistent ({settings.CHROMA_PERSIST_DIR})",
+    }
+    
+    logger.info("=== Validating Environment Variables ===")
+    for name, val in vars_to_check.items():
+        if not val or val.startswith("your-") or val == "sk-..." or val == "hf_...":
+            logger.warning(f"  {name}: Missing or placeholder value configured.")
+        else:
+            # Mask the secret if it is long enough
+            masked = val
+            if isinstance(val, str) and len(val) > 8:
+                if "://" in val:
+                    # Database connection string, mask password
+                    import re
+                    masked = re.sub(r'://([^:]+):([^@]+)@', r'://\1:******@', val)
+                else:
+                    masked = val[:4] + "..." + val[-4:]
+            logger.info(f"  {name}: Configured and active ({masked})")
+    logger.info("========================================")
 
 async def build_index_for_dataset(dataset_doc: dict, db) -> str:
     """Download, extract, chunk, embed, and store dataset in ChromaDB or FAISS."""
@@ -192,55 +291,85 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         res = await db.rag_indexes.insert_one(new_index)
         index_id = str(res.inserted_id)
 
+    # Validate environment variables
+    try:
+        validate_environment_variables()
+    except Exception as val_env_err:
+        logger.warning(f"Failed to validate environment variables: {val_env_err}")
+
     temp_path = None
     is_temp = False
     try:
-        # 2. Get dataset file path
-        temp_path, is_temp = await get_dataset_file(dataset_doc)
+        # Step 1: File Retrieval & Verification
+        logger.info(f"[Step 1/6] Retrieving dataset file: {file_name}")
+        try:
+            temp_path, is_temp = await get_dataset_file(dataset_doc)
+            if not temp_path or not os.path.exists(temp_path) or not os.path.isfile(temp_path):
+                raise Exception("The retrieved path is empty or does not exist on disk.")
+            logger.info(f"✓ File retrieved and verified at path: {temp_path}")
+        except Exception as file_err:
+            raise Exception(f"File Access Failure: Dataset file '{file_name}' could not be located or downloaded. Details: {str(file_err)}")
         
-        # 3. Process the file metadata for the dataset document compatibility
-        meta_res = await asyncio.to_thread(_process_sync, temp_path, file_type)
-        logger.info("Dataset loaded")
+        # Step 2: File Parsing & Metadata Extraction
+        logger.info("[Step 2/6] Parsing file and extracting metadata...")
+        try:
+            meta_res = await asyncio.to_thread(_process_sync, temp_path, file_type)
+            logger.info("✓ Metadata extraction completed successfully.")
+        except Exception as parse_err:
+            raise Exception(f"File Parsing Failure: The file format is corrupt or unsupported. Details: {str(parse_err)}")
         
         await db.rag_indexes.update_one(
             {"_id": index_id},
             {"$set": {"progress": 30.0}}
         )
         
-        # 4. Extract text
-        chunks = await extract_text_from_file(temp_path, file_type)
-        
-        if not chunks:
-            raise Exception("No text content could be extracted from this dataset.")
-        logger.info("Chunks created")
+        # Step 3: Text Chunking
+        logger.info("[Step 3/6] Chunking data for vector embedding...")
+        try:
+            chunks = await extract_text_from_file(temp_path, file_type)
+            if not chunks:
+                raise Exception("No text content could be parsed or extracted from the dataset.")
+            logger.info(f"✓ Text chunking completed. Generated {len(chunks)} chunks.")
+        except Exception as extract_err:
+            raise Exception(f"Text Extraction Failure: Failed to split dataset into text chunks. Details: {str(extract_err)}")
         
         await db.rag_indexes.update_one(
             {"_id": index_id},
             {"$set": {"progress": 50.0}}
         )
             
-        # 5. Generate embeddings & Store in VectorStore
-        embedder = await get_embedding_model_async("paraphrase-MiniLM-L3-v2")
-        
-        embeddings = []
-        batch_size = 32
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i:i+batch_size]
-            if asyncio.iscoroutinefunction(embedder.encode):
-                batch_embeds = await embedder.encode(batch)
-            else:
-                batch_embeds = await asyncio.to_thread(embedder.encode, batch)
-            if hasattr(batch_embeds, "tolist"):
-                batch_embeds = batch_embeds.tolist()
-            embeddings.extend(batch_embeds)
-            # Yield control back to event loop to allow concurrent HTTP requests to run
-            await asyncio.sleep(0.02)
-        logger.info("Embeddings generated")
+        # Step 4: Embedding Model Initialization & Generation
+        logger.info("[Step 4/6] Initializing embedding model and generating vectors...")
+        try:
+            logger.info("Initializing embedding model: 'paraphrase-MiniLM-L3-v2'...")
+            embedder = await get_embedding_model_async("paraphrase-MiniLM-L3-v2")
+            logger.info("✓ Embedding model initialized successfully.")
+        except Exception as model_err:
+            raise Exception(f"Embedding Model Initialization Failure: {str(model_err)}")
+            
+        try:
+            logger.info(f"Generating embeddings for {len(chunks)} chunks...")
+            embeddings = []
+            batch_size = 32
+            for i in range(0, len(chunks), batch_size):
+                batch = chunks[i:i+batch_size]
+                if asyncio.iscoroutinefunction(embedder.encode):
+                    batch_embeds = await embedder.encode(batch)
+                else:
+                    batch_embeds = await asyncio.to_thread(embedder.encode, batch)
+                if hasattr(batch_embeds, "tolist"):
+                    batch_embeds = batch_embeds.tolist()
+                embeddings.extend(batch_embeds)
+                await asyncio.sleep(0.02)
+            logger.info("✓ Embedding vectors generated successfully.")
+        except Exception as embed_err:
+            raise Exception(f"Embedding Generation Failure: Failed to generate vectors for chunks. Details: {str(embed_err)}")
         
         await db.rag_indexes.update_one(
             {"_id": index_id},
             {"$set": {"progress": 75.0}}
         )
+        
         # Verify dataset still exists before populating vector store
         exists = await db.datasets.find_one({"_id": dataset_doc["_id"]})
         if not exists:
@@ -253,34 +382,45 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
                 pass
             return ""
 
-        store = VectorStore(backend=index_type, collection_name=index_id)
-        metadatas = []
-        for idx, chunk in enumerate(chunks):
-            metadatas.append({
-                "document_id": dataset_id,
-                "chunk_id": f"{index_id}_{idx}",
-                "source_file": file_name,
-                "chunk_text": chunk
-            })
-        ids = [f"{index_id}_{idx}" for idx in range(len(chunks))]
-        
-        await store.add_documents(chunks, embeddings, metadatas, ids)
-        logger.info("Documents stored in ChromaDB")
-        
-        # Log collection count
-        col_count = await store.count()
-        logger.info(f"Collection count: {col_count}")
+        # Step 5: Vector Database Insertion
+        logger.info(f"[Step 5/6] Connecting to vector store ({index_type}) and inserting documents...")
+        try:
+            store = VectorStore(backend=index_type, collection_name=index_id)
+            await store.ensure_initialized()
+            
+            metadatas = []
+            for idx, chunk in enumerate(chunks):
+                metadatas.append({
+                    "document_id": dataset_id,
+                    "chunk_id": f"{index_id}_{idx}",
+                    "source_file": file_name,
+                    "chunk_text": chunk
+                })
+            ids = [f"{index_id}_{idx}" for idx in range(len(chunks))]
+            
+            await store.add_documents(chunks, embeddings, metadatas, ids)
+            col_count = await store.count()
+            logger.info(f"✓ Vector DB storage populated. Collection now has {col_count} items.")
+        except Exception as db_err:
+            raise Exception(f"Vector Database Insertion Failure: Failed to store vectors in ChromaDB/FAISS. Details: {str(db_err)}")
         
         await db.rag_indexes.update_one(
             {"_id": index_id},
             {"$set": {"progress": 90.0}}
         )
 
-        # Precompute EDA and preview so they don't block requests or cause timeouts on load
-        from datasets.processor import _eda_sync
-        from api.routes.datasets import _generate_preview
-        eda_res = await asyncio.to_thread(_eda_sync, temp_path, file_type)
-        preview_res = await asyncio.to_thread(_generate_preview, temp_path, file_type)
+        # Step 6: Post-processing (EDA stats & preview generation)
+        logger.info("[Step 6/6] Post-processing (generating EDA stats and preview)...")
+        try:
+            from datasets.processor import _eda_sync
+            from api.routes.datasets import _generate_preview
+            eda_res = await asyncio.to_thread(_eda_sync, temp_path, file_type)
+            preview_res = await asyncio.to_thread(_generate_preview, temp_path, file_type)
+            logger.info("✓ EDA stats and preview precomputed.")
+        except Exception as post_err:
+            logger.warning(f"Post-processing warning: Failed to generate EDA/preview: {post_err}")
+            eda_res = {}
+            preview_res = {}
         
         # 6. Update status to indexed in DB
         await db.datasets.update_one(
@@ -293,7 +433,8 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
                 "metadata": meta_res.get("metadata", {}),
                 "stats": eda_res,
                 "preview": preview_res,
-                "processed_at": datetime.utcnow()
+                "processed_at": datetime.utcnow(),
+                "error_message": None
             }}
         )
         
@@ -301,7 +442,7 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             {"_id": index_id},
             {"$set": {"status": "ready", "progress": 100.0, "chunk_count": len(chunks), "error": None}}
         )
-        logger.info("Index status updated to READY")
+        logger.info("✓ Index status updated to READY")
         
         # Trigger auto API key generation
         user_id = dataset_doc.get("user_id")
@@ -314,14 +455,18 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         logger.info(f"Successfully indexed dataset {dataset_id} with {len(chunks)} chunks using {index_type}.")
         return index_id
     except Exception as e:
-        logger.exception(f"Indexing failed: {e}")
+        import traceback
+        full_stack = traceback.format_exc()
+        logger.error(f"Indexing failed for dataset {dataset_id}:\n{full_stack}")
+        
+        error_msg = str(e)
         await db.datasets.update_one(
             {"_id": dataset_doc["_id"]},
-            {"$set": {"status": "failed", "error_message": str(e)}}
+            {"$set": {"status": "failed", "error_message": error_msg}}
         )
         await db.rag_indexes.update_one(
             {"_id": index_id},
-            {"$set": {"status": "failed", "progress": 0.0, "error": str(e)}}
+            {"$set": {"status": "failed", "progress": 0.0, "error": error_msg}}
         )
         raise
     finally:

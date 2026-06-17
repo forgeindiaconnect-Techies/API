@@ -55,7 +55,7 @@ async def test_fallback():
         
         # Verify result fields
         assert res["name"] == "test_fallback.csv"
-        assert res["status"] == "processing"
+        assert res["status"] == "pending"
         
         # Check database document
         inserted_docs = mock_db.datasets._collection._data

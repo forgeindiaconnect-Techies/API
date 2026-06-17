@@ -18,6 +18,7 @@ from models import (
 from auth.utils import get_current_user, get_id_query
 from database import get_db
 from config import settings
+from services.dataset_service import download_file_from_gridfs
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 logger = logging.getLogger(__name__)
