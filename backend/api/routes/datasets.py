@@ -162,16 +162,77 @@ async def upload_dataset(
         logger.error(f"Failed to save and validate temp file locally: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to store file: {str(e)}")
 
-    # 4. Create a pending dataset record in MongoDB
+    # 4. Cloudinary upload (Sync/Await)
+    cloudinary_res = None
+    cloudinary_err_msg = None
+    if settings.CLOUDINARY_CLOUD_NAME and settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET:
+        try:
+            logger.info(f"Uploading {file.filename} to Cloudinary...")
+            from services.cloudinary_service import upload_file_to_cloudinary
+            cloudinary_res = await upload_file_to_cloudinary(file_bytes, file.filename, resource_type="raw")
+            logger.info(f"Cloudinary upload succeeded. Complete response: {cloudinary_res}")
+        except Exception as upload_err:
+            cloudinary_err_msg = str(upload_err)
+            logger.error(f"Cloudinary upload failed: {upload_err}")
+    else:
+        cloudinary_err_msg = "Cloudinary credentials not configured"
+        logger.warning("Cloudinary credentials not configured. Skipping Cloudinary upload.")
+
+    # 5. GridFS upload (Sync/Await)
+    gridfs_id = None
+    gridfs_err_msg = None
+    try:
+        logger.info(f"Backing up {file.filename} to GridFS...")
+        from services.dataset_service import upload_file_to_gridfs
+        content_type = "application/octet-stream"
+        if ext == "txt":
+            content_type = "text/plain"
+        elif ext == "csv":
+            content_type = "text/csv"
+        elif ext == "pdf":
+            content_type = "application/pdf"
+        elif ext == "json":
+            content_type = "application/json"
+        
+        gridfs_id = await upload_file_to_gridfs(file_bytes, file.filename, content_type)
+        if not gridfs_id:
+            gridfs_id = None
+            gridfs_err_msg = "GridFS upload returned empty ID"
+            logger.error("GridFS upload returned empty ID")
+        else:
+            logger.info(f"Successfully uploaded to GridFS with ID: {gridfs_id}")
+    except Exception as gridfs_err:
+        gridfs_err_msg = str(gridfs_err)
+        logger.error(f"GridFS backup failed: {gridfs_err}")
+
+    # 6. Validation: if BOTH failed, raise HTTPException and delete local file
+    if not cloudinary_res and not gridfs_id:
+        if os.path.exists(local_path):
+            os.remove(local_path)
+        logger.error(f"Validation Failed: Both Cloudinary and GridFS backups failed. Cloudinary error: {cloudinary_err_msg}. GridFS error: {gridfs_err_msg}.")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Storage persistence failed. Both Cloudinary and GridFS backup attempts failed. Cloudinary: {cloudinary_err_msg}. GridFS: {gridfs_err_msg}."
+        )
+
+    # 7. Create a dataset record in MongoDB
+    sec_url = None
+    public_id = None
+    if cloudinary_res:
+        sec_url = cloudinary_res.get("secure_url") or cloudinary_res.get("url")
+        public_id = cloudinary_res.get("public_id")
+
     doc = {
-        "cloudinary_url": None,
-        "public_id": None,
+        "cloudinary_url": sec_url,
+        "secure_url": sec_url,
+        "public_id": public_id,
+        "gridfs_id": gridfs_id,
         "file_path": local_path,
         "file_name": file.filename,
         "name": file.filename,
         "file_type": ext,
         "size_bytes": file_size,
-        "status": "pending",
+        "status": "processing",
         "user_id": str(current_user["_id"]),
         "created_at": datetime.utcnow(),
     }
@@ -185,89 +246,16 @@ async def upload_dataset(
             {"_id": result.inserted_id},
             {"$set": {"dataset_id": str(result.inserted_id)}}
         )
+        logger.info(f"Successfully created dataset document in MongoDB: {doc['_id']} with status 'processing'")
     except Exception as e:
-        logger.error(f"Failed to insert pending dataset document: {e}")
+        logger.error(f"Failed to insert dataset document: {e}")
         if os.path.exists(local_path):
             os.remove(local_path)
         raise HTTPException(status_code=500, detail="Database insertion failed")
 
-    # 5. Define background task for Cloudinary upload & RAG indexing
-    async def process_upload_and_index_bg(dataset_doc: dict, file_content: bytes, filename: str, path: str):
-        try:
-            db_instance = get_db()
-            
-            # 1. Cloudinary upload
-            cloudinary_res = None
-            if settings.CLOUDINARY_CLOUD_NAME and settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET:
-                try:
-                    logger.info(f"Background: Uploading {filename} to Cloudinary...")
-                    from services.cloudinary_service import upload_file_to_cloudinary
-                    cloudinary_res = await upload_file_to_cloudinary(file_content, filename, resource_type="raw")
-                    logger.info("Background: Successfully uploaded dataset to Cloudinary.")
-                except Exception as upload_err:
-                    logger.warning(f"Background: Cloudinary upload failed: {upload_err}. Staying with local path.")
-
-            # 2. GridFS upload (as a robust database persistence backup)
-            gridfs_id = None
-            try:
-                logger.info(f"Background: Backing up {filename} to GridFS...")
-                from services.dataset_service import upload_file_to_gridfs
-                ext = filename.split(".")[-1].lower()
-                content_type = "application/octet-stream"
-                if ext == "txt":
-                    content_type = "text/plain"
-                elif ext == "csv":
-                    content_type = "text/csv"
-                elif ext == "pdf":
-                    content_type = "application/pdf"
-                elif ext == "json":
-                    content_type = "application/json"
-                
-                gridfs_id = await upload_file_to_gridfs(file_content, filename, content_type)
-            except Exception as gridfs_err:
-                logger.error(f"Background: GridFS backup failed: {gridfs_err}")
-
-            # Update DB document with Cloudinary URL and GridFS ID
-            updates = {}
-            if cloudinary_res:
-                sec_url = cloudinary_res.get("secure_url") or cloudinary_res.get("url")
-                dataset_doc["cloudinary_url"] = sec_url
-                dataset_doc["secure_url"] = sec_url
-                dataset_doc["public_id"] = cloudinary_res["public_id"]
-                updates["cloudinary_url"] = sec_url
-                updates["secure_url"] = sec_url
-                updates["public_id"] = cloudinary_res["public_id"]
-                logger.info(f"Background: Cloudinary attributes to save: url={sec_url}, public_id={cloudinary_res['public_id']}")
-                
-            if gridfs_id:
-                dataset_doc["gridfs_id"] = gridfs_id
-                updates["gridfs_id"] = gridfs_id
-
-            if updates:
-                await db_instance.datasets.update_one(
-                    {"_id": ObjectId(dataset_doc["_id"])},
-                    {"$set": updates}
-                )
-                logger.info(f"Background: Updated database record for dataset {dataset_doc['_id']} with updates: {updates}")
-            
-            # Index the dataset
-            from services.dataset_service import build_index_for_dataset
-            await build_index_for_dataset(dataset_doc, db_instance)
-        except Exception as bg_err:
-            logger.error(f"Background upload processing failed for dataset {dataset_doc.get('_id')}: {bg_err}")
-            db_instance = get_db()
-            await db_instance.datasets.update_one(
-                {"_id": ObjectId(dataset_doc["_id"])},
-                {"$set": {"status": "failed", "error_message": f"Background processing failed: {str(bg_err)}"}}
-            )
-
-    background_tasks.add_task(
-        process_upload_and_index_bg,
-        doc,
-        file_bytes,
-        file.filename,
-        local_path
-    )
+    # 8. Add background task for RAG indexing
+    from services.dataset_service import build_index_for_dataset
+    background_tasks.add_task(build_index_for_dataset, doc, db)
 
     return fmt_dataset(doc)
 

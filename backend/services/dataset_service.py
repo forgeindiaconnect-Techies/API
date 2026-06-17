@@ -192,6 +192,10 @@ async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
     dataset_id = str(dataset_doc.get("_id"))
     file_name = dataset_doc.get("file_name") or dataset_doc.get("name", "unknown")
     
+    local_detail = f"path '{local_path}' is missing or not a file"
+    cloudinary_detail = "missing"
+    gridfs_detail = "missing"
+    
     # 1. Local filesystem check
     logger.info(f"File Recovery: [1/3] Checking local filesystem for dataset '{file_name}' (ID: {dataset_id})...")
     local_exists = False
@@ -213,7 +217,7 @@ async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
     if local_exists and resolved_local_path:
         return resolved_local_path, False
 
-    logger.warning(f"File Recovery: Local copy is missing at path '{local_path}'. Moving to Cloudinary recovery...")
+    logger.warning(f"File Recovery: Local copy is missing ({local_detail}). Moving to Cloudinary recovery...")
     
     # 2. Cloudinary download recovery
     if cloudinary_url:
@@ -223,6 +227,7 @@ async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
             logger.info(f"✓ File Recovery: Successfully recovered dataset from Cloudinary at: {temp_path}")
             return temp_path, True
         except Exception as cloud_err:
+            cloudinary_detail = f"failed: {str(cloud_err)}"
             logger.error(f"File Recovery: Cloudinary download failed for dataset '{file_name}': {cloud_err}", exc_info=True)
             logger.info("File Recovery: Cloudinary download failed. Moving to GridFS recovery...")
     else:
@@ -236,6 +241,7 @@ async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
             logger.info(f"✓ File Recovery: Successfully recovered dataset from GridFS at: {temp_path}")
             return temp_path, True
         except Exception as grid_err:
+            gridfs_detail = f"failed: {str(grid_err)}"
             logger.error(f"File Recovery: GridFS download failed for dataset '{file_name}' (ID: {dataset_id}): {grid_err}", exc_info=True)
     else:
         logger.warning(f"File Recovery: [3/3] GridFS backup ID is missing for dataset '{file_name}' (ID: {dataset_id}).")
@@ -243,8 +249,9 @@ async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
     # Neither local file, Cloudinary, nor GridFS works. Raise detailed error message.
     raise Exception(
         f"File Recovery Failure: All recovery methods (local, Cloudinary, GridFS) have failed. "
-        f"The local file is missing, the Cloudinary URL is either missing or failed, "
-        f"and the GridFS backup is either missing or failed for dataset '{file_name}' (ID: {dataset_id})."
+        f"The local file is missing ({local_detail}). "
+        f"Cloudinary retrieval was {cloudinary_detail}. "
+        f"GridFS retrieval was {gridfs_detail} for dataset '{file_name}' (ID: {dataset_id})."
     )
 
 
