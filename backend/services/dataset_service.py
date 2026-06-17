@@ -13,6 +13,7 @@ from database import get_db
 from vector_db.store import VectorStore, get_embedding_model, get_embedding_model_async
 from services.chroma_service import run_with_retry_async
 from datasets.processor import _process_sync
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -180,18 +181,15 @@ async def download_file_from_gridfs(dataset_doc: dict) -> str:
         raise
 
 async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
-    """Get the file path for the dataset. If cloudinary_url is present, download it.
-    Otherwise, fallback to local file_path if it exists. Then try GridFS backup. Returns (path, is_temp)."""
-    cloudinary_url = dataset_doc.get("cloudinary_url")
-    if cloudinary_url:
-        try:
-            temp_path = await download_file_from_cloudinary(cloudinary_url)
-            return temp_path, True
-        except Exception as e:
-            logger.error(f"Failed to download Cloudinary URL: {e}. Checking local path...")
-    
-    # Check local path
+    """Get the file path for the dataset. If local file is missing, validate cloudinary_url and download.
+    Fallback to GridFS backup if both fail. Returns (path, is_temp)."""
     local_path = dataset_doc.get("file_path")
+    cloudinary_url = dataset_doc.get("cloudinary_url")
+    gridfs_id = dataset_doc.get("gridfs_id")
+    
+    # 1. Check local path
+    local_exists = False
+    resolved_local_path = None
     if local_path:
         paths_to_try = [
             local_path,
@@ -202,10 +200,27 @@ async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
         for p in paths_to_try:
             if os.path.exists(p) and os.path.isfile(p):
                 logger.info(f"Found local file at: {p}")
-                return p, False
+                local_exists = True
+                resolved_local_path = p
+                break
+                
+    if local_exists and resolved_local_path:
+        return resolved_local_path, False
 
-    # Check GridFS backup
-    gridfs_id = dataset_doc.get("gridfs_id")
+    # Local file is missing. Let's log it and attempt Cloudinary download.
+    logger.warning(f"Local file is missing at path: {local_path}. Checking Cloudinary backup...")
+    
+    # 2. Try Cloudinary download
+    if cloudinary_url:
+        try:
+            temp_path = await download_file_from_cloudinary(cloudinary_url)
+            return temp_path, True
+        except Exception as e:
+            logger.error(f"Failed to download Cloudinary URL: {e}. Checking GridFS backup...")
+    else:
+        logger.warning(f"Cloudinary URL is not configured/present for dataset record '{dataset_doc.get('_id')}'")
+        
+    # 3. Check GridFS backup
     if gridfs_id:
         try:
             logger.info(f"Downloading dataset from GridFS (ID: {gridfs_id})...")
@@ -213,8 +228,13 @@ async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
             return temp_path, True
         except Exception as e:
             logger.error(f"Failed to download from GridFS: {e}")
-                
-    raise Exception("Dataset file could not be found locally, downloaded from Cloudinary, or retrieved from GridFS")
+
+    # Neither local file, Cloudinary, nor GridFS works. Raise detailed error message.
+    raise Exception(
+        f"File Recovery Failure: The original file could not be located on the server, Cloudinary, or GridFS. "
+        f"This dataset was uploaded before persistent backups were implemented, and the local server cache has restarted. "
+        f"Please delete this dataset and upload it again."
+    )
 
 
 def validate_environment_variables():
@@ -226,6 +246,9 @@ def validate_environment_variables():
         "GEMINI_API_KEY": settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY"),
         "HUGGINGFACE_TOKEN/API_KEY": settings.HUGGINGFACE_TOKEN or os.environ.get("HUGGINGFACE_API_KEY"),
         "CHROMA_URL": os.environ.get("CHROMA_URL") or os.environ.get("CHROMA_SERVER_HOST") or f"Local Persistent ({settings.CHROMA_PERSIST_DIR})",
+        "CLOUDINARY_CLOUD_NAME": settings.CLOUDINARY_CLOUD_NAME or os.environ.get("CLOUDINARY_CLOUD_NAME"),
+        "CLOUDINARY_API_KEY": settings.CLOUDINARY_API_KEY or os.environ.get("CLOUDINARY_API_KEY"),
+        "CLOUDINARY_API_SECRET": settings.CLOUDINARY_API_SECRET or os.environ.get("CLOUDINARY_API_SECRET"),
     }
     
     logger.info("=== Validating Environment Variables ===")
@@ -259,10 +282,12 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         return ""
 
     # 1. Update status to processing in DB
+    logger.info(f"Database Update: Changing status of dataset '{dataset_id}' to 'processing'...")
     await db.datasets.update_one(
         {"_id": dataset_doc["_id"]},
         {"$set": {"status": "processing", "error_message": None}}
     )
+    logger.info(f"Database Update: Status successfully changed to 'processing' for dataset '{dataset_id}'.")
     
     # Check if there is an index document in rag_indexes
     index_doc = await db.rag_indexes.find_one({"dataset_id": dataset_id})
@@ -346,68 +371,119 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             logger.info("✓ Embedding model initialized successfully.")
         except Exception as model_err:
             raise Exception(f"Embedding Model Initialization Failure: {str(model_err)}")
-            
-        try:
-            logger.info(f"Generating embeddings for {len(chunks)} chunks...")
-            embeddings = []
-            batch_size = 32
-            for i in range(0, len(chunks), batch_size):
-                batch = chunks[i:i+batch_size]
-                if asyncio.iscoroutinefunction(embedder.encode):
-                    batch_embeds = await embedder.encode(batch)
-                else:
-                    batch_embeds = await asyncio.to_thread(embedder.encode, batch)
-                if hasattr(batch_embeds, "tolist"):
-                    batch_embeds = batch_embeds.tolist()
-                embeddings.extend(batch_embeds)
-                await asyncio.sleep(0.02)
-            logger.info("✓ Embedding vectors generated successfully.")
-        except Exception as embed_err:
-            raise Exception(f"Embedding Generation Failure: Failed to generate vectors for chunks. Details: {str(embed_err)}")
-        
-        await db.rag_indexes.update_one(
-            {"_id": index_id},
-            {"$set": {"progress": 75.0}}
-        )
-        
-        # Verify dataset still exists before populating vector store
-        exists = await db.datasets.find_one({"_id": dataset_doc["_id"]})
-        if not exists:
-            logger.warning(f"Aborting indexing: dataset {dataset_id} was deleted by the user during embedding generation")
-            await db.rag_indexes.delete_many({"dataset_id": dataset_id})
-            try:
-                store = VectorStore(backend=index_type, collection_name=index_id)
-                await store.delete_store()
-            except Exception:
-                pass
-            return ""
 
-        # Step 5: Vector Database Insertion
-        logger.info(f"[Step 5/6] Connecting to vector store ({index_type}) and inserting documents...")
+        # Step 5: Connecting to Vector Store & Initializing Collection
+        logger.info(f"[Step 5/6] Connecting to vector store ({index_type}) and initializing collection...")
         try:
             store = VectorStore(backend=index_type, collection_name=index_id)
+            logger.info(f"Initializing VectorStore backend '{index_type}' for collection '{index_id}'...")
             await store.ensure_initialized()
             
-            metadatas = []
-            for idx, chunk in enumerate(chunks):
-                metadatas.append({
-                    "document_id": dataset_id,
-                    "chunk_id": f"{index_id}_{idx}",
-                    "source_file": file_name,
-                    "chunk_text": chunk
-                })
-            ids = [f"{index_id}_{idx}" for idx in range(len(chunks))]
+            # Active Connection Verification
+            if index_type == "chroma":
+                if hasattr(store, "_client") and store._client is not None:
+                    logger.info("✓ Verification: ChromaDB connection is active.")
+                else:
+                    raise Exception("ChromaDB client connection is inactive or failed to initialize.")
+                
+                if hasattr(store, "_collection") and store._collection is not None:
+                    logger.info(f"✓ Verification: ChromaDB collection '{index_id}' exists and is ready.")
+                else:
+                    raise Exception(f"ChromaDB collection '{index_id}' does not exist or failed to create.")
+            elif index_type == "faiss":
+                if hasattr(store, "_index") and store._index is not None:
+                    logger.info("✓ Verification: FAISS index is active and ready.")
+                else:
+                    raise Exception("FAISS index is inactive or failed to initialize.")
+        except Exception as db_init_err:
+            raise Exception(f"Vector Database Initialization Failure: Failed to establish store connection. Details: {str(db_init_err)}")
+
+        # Cloudinary verification check when required
+        cloudinary_configured = bool(settings.CLOUDINARY_CLOUD_NAME and settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET)
+        if cloudinary_configured:
+            logger.info("Verification: Cloudinary configuration is active. Checking dataset 'cloudinary_url'...")
+            if not dataset_doc.get("cloudinary_url"):
+                logger.warning(f"Verification WARNING: Dataset '{dataset_id}' does not have a 'cloudinary_url' despite Cloudinary being configured.")
+            else:
+                logger.info(f"Verification: Dataset 'cloudinary_url' is present: {dataset_doc.get('cloudinary_url')}")
+        else:
+            logger.info("Verification: Cloudinary configuration is empty; Cloudinary URL is not required.")
+
+        # Batch Processing: Embeddings Generation and Vector store insertions
+        batch_size = 50
+        total_chunks = len(chunks)
+        logger.info(f"Starting batched embedding generation and vector store insertion (batch size: {batch_size}, total: {total_chunks} chunks)...")
+
+        # Pre-build metadatas and IDs
+        metadatas = []
+        for idx, chunk in enumerate(chunks):
+            metadatas.append({
+                "document_id": dataset_id,
+                "chunk_id": f"{index_id}_{idx}",
+                "source_file": file_name,
+                "chunk_text": chunk
+            })
+        ids = [f"{index_id}_{idx}" for idx in range(len(chunks))]
+
+        for i in range(0, total_chunks, batch_size):
+            # Verify dataset still exists before processing next batch
+            exists = await db.datasets.find_one({"_id": dataset_doc["_id"]})
+            if not exists:
+                logger.warning(f"Aborting indexing: dataset {dataset_id} was deleted by the user during batch processing")
+                await db.rag_indexes.delete_many({"dataset_id": dataset_id})
+                try:
+                    await store.delete_store()
+                except Exception:
+                    pass
+                return ""
+
+            batch_chunks = chunks[i:i+batch_size]
+            batch_ids = ids[i:i+batch_size]
+            batch_metadatas = metadatas[i:i+batch_size]
+
+            # 1. Embedding generation for batch
+            logger.info(f"Generating embeddings for batch of {len(batch_chunks)} chunks (range {i} to {i+len(batch_chunks)})...")
+            try:
+                if asyncio.iscoroutinefunction(embedder.encode):
+                    batch_embeds = await embedder.encode(batch_chunks)
+                else:
+                    batch_embeds = await asyncio.to_thread(embedder.encode, batch_chunks)
+                if hasattr(batch_embeds, "tolist"):
+                    batch_embeds = batch_embeds.tolist()
+            except Exception as embed_err:
+                raise Exception(f"Embedding Generation Failure: Failed to generate vectors for batch {i}-{i+len(batch_chunks)}. Details: {str(embed_err)}")
+
+            # 2. Verify embeddings shape is valid
+            if not isinstance(batch_embeds, list) or len(batch_embeds) != len(batch_chunks):
+                raise Exception(f"Embedding Shape Verification Failure: Expected {len(batch_chunks)} vectors, got {len(batch_embeds) if isinstance(batch_embeds, list) else type(batch_embeds)}")
             
-            await store.add_documents(chunks, embeddings, metadatas, ids)
-            col_count = await store.count()
-            logger.info(f"✓ Vector DB storage populated. Collection now has {col_count} items.")
-        except Exception as db_err:
-            raise Exception(f"Vector Database Insertion Failure: Failed to store vectors in ChromaDB/FAISS. Details: {str(db_err)}")
-        
-        await db.rag_indexes.update_one(
-            {"_id": index_id},
-            {"$set": {"progress": 90.0}}
-        )
+            for v_idx, vec in enumerate(batch_embeds):
+                if not isinstance(vec, list) or len(vec) == 0:
+                    raise Exception(f"Embedding Shape Verification Failure: Vector at index {v_idx} is empty or not a list.")
+            
+            dim = len(batch_embeds[0])
+            logger.info(f"✓ Verification: Embedding shape for batch is valid: [{len(batch_embeds)}, {dim}]")
+
+            # 3. Vector store insertion for batch
+            logger.info(f"Inserting batch of {len(batch_chunks)} vectors into vector store ({index_type})...")
+            try:
+                prev_count = await store.count()
+                await store.add_documents(batch_chunks, batch_embeds, batch_metadatas, batch_ids)
+                col_count = await store.count()
+                logger.info(f"✓ Verification: Batch insert complete. Collection count grew from {prev_count} to {col_count} (expected +{len(batch_chunks)})")
+            except Exception as db_err:
+                raise Exception(f"Vector Database Insertion Failure: Failed to store batch vectors in ChromaDB/FAISS. Details: {str(db_err)}")
+
+            # Update progress
+            progress = 50.0 + (min(i + batch_size, total_chunks) / total_chunks) * 40.0
+            await db.rag_indexes.update_one(
+                {"_id": index_id},
+                {"$set": {"progress": round(progress, 1)}}
+            )
+            
+            await asyncio.sleep(0.02)
+
+        logger.info(f"✓ All {total_chunks} chunks successfully embedded and stored in {index_type} (final count: {col_count})")
 
         # Step 6: Post-processing (EDA stats & preview generation)
         logger.info("[Step 6/6] Post-processing (generating EDA stats and preview)...")
@@ -423,6 +499,7 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             preview_res = {}
         
         # 6. Update status to indexed in DB
+        logger.info(f"Database Update: Changing status of dataset '{dataset_id}' to 'indexed'...")
         await db.datasets.update_one(
             {"_id": dataset_doc["_id"]},
             {"$set": {
@@ -437,12 +514,14 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
                 "error_message": None
             }}
         )
+        logger.info(f"Database Update: Status successfully changed to 'indexed' for dataset '{dataset_id}'.")
         
+        logger.info(f"Database Update: Changing status of RAG index '{index_id}' to 'ready'...")
         await db.rag_indexes.update_one(
             {"_id": index_id},
             {"$set": {"status": "ready", "progress": 100.0, "chunk_count": len(chunks), "error": None}}
         )
-        logger.info("✓ Index status updated to READY")
+        logger.info(f"Database Update: RAG index '{index_id}' status successfully changed to 'ready'.")
         
         # Trigger auto API key generation
         user_id = dataset_doc.get("user_id")
@@ -460,14 +539,19 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         logger.error(f"Indexing failed for dataset {dataset_id}:\n{full_stack}")
         
         error_msg = str(e)
+        logger.info(f"Database Update: Changing status of dataset '{dataset_id}' to 'failed' and saving error message: {error_msg}...")
         await db.datasets.update_one(
             {"_id": dataset_doc["_id"]},
             {"$set": {"status": "failed", "error_message": error_msg}}
         )
+        logger.info(f"Database Update: Status successfully changed to 'failed' for dataset '{dataset_id}'.")
+        
+        logger.info(f"Database Update: Changing status of RAG index '{index_id}' to 'failed'...")
         await db.rag_indexes.update_one(
             {"_id": index_id},
             {"$set": {"status": "failed", "progress": 0.0, "error": error_msg}}
         )
+        logger.info(f"Database Update: RAG index '{index_id}' status successfully changed to 'failed'.")
         raise
     finally:
         if temp_path and is_temp and os.path.exists(temp_path):

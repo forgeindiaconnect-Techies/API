@@ -225,10 +225,14 @@ async def upload_dataset(
             # Update DB document with Cloudinary URL and GridFS ID
             updates = {}
             if cloudinary_res:
-                dataset_doc["cloudinary_url"] = cloudinary_res["url"]
+                sec_url = cloudinary_res.get("secure_url") or cloudinary_res.get("url")
+                dataset_doc["cloudinary_url"] = sec_url
+                dataset_doc["secure_url"] = sec_url
                 dataset_doc["public_id"] = cloudinary_res["public_id"]
-                updates["cloudinary_url"] = cloudinary_res["url"]
+                updates["cloudinary_url"] = sec_url
+                updates["secure_url"] = sec_url
                 updates["public_id"] = cloudinary_res["public_id"]
+                logger.info(f"Background: Cloudinary attributes to save: url={sec_url}, public_id={cloudinary_res['public_id']}")
                 
             if gridfs_id:
                 dataset_doc["gridfs_id"] = gridfs_id
@@ -239,6 +243,7 @@ async def upload_dataset(
                     {"_id": ObjectId(dataset_doc["_id"])},
                     {"$set": updates}
                 )
+                logger.info(f"Background: Updated database record for dataset {dataset_doc['_id']} with updates: {updates}")
             
             # Index the dataset
             from services.dataset_service import build_index_for_dataset

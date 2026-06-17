@@ -28,7 +28,6 @@ else:
         "Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET. "
         "File uploads will fall back to local storage."
     )
-
 async def upload_file_to_cloudinary(file_bytes: bytes, file_name: str) -> dict:
     """
     Upload file bytes to Cloudinary.
@@ -38,6 +37,7 @@ async def upload_file_to_cloudinary(file_bytes: bytes, file_name: str) -> dict:
     
     ext = file_name.split(".")[-1].lower()
     resource_type = "image" if ext in ("jpg", "jpeg", "png", "webp", "gif") else "raw"
+    logger.info(f"Cloudinary Upload: File extension '{ext}' identified. Using resource_type='{resource_type}' (required raw for csv/txt/pdf/docx)")
     
     def _upload():
         return cloudinary.uploader.upload(
@@ -48,14 +48,17 @@ async def upload_file_to_cloudinary(file_bytes: bytes, file_name: str) -> dict:
     
     try:
         result = await asyncio.to_thread(_upload)
+        logger.info(f"Complete Cloudinary upload response: {result}")
+        
         url = result.get("secure_url") or result.get("url")
         public_id = result.get("public_id")
         logger.info(f"Cloudinary upload successful: {public_id}")
+        
         return {
             "url": url,
+            "secure_url": result.get("secure_url") or url,
             "public_id": public_id,
         }
     except Exception as e:
         logger.error(f"Cloudinary upload failed for '{file_name}': {e}")
         raise
-
