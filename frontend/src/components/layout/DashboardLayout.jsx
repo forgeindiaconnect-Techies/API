@@ -17,7 +17,6 @@ const navItems = [
   { icon: Brain, label: 'Models', path: '/models' },
   { icon: Cpu, label: 'Training', path: '/training' },
   { icon: Search, label: 'RAG Search', path: '/rag' },
-  { icon: Layers, label: 'Multimodal', path: '/multimodal' },
   { icon: Key, label: 'API Keys', path: '/api-keys' },
   { icon: BarChart3, label: 'Analytics', path: '/analytics' },
   { icon: Settings, label: 'Settings', path: '/settings' },
