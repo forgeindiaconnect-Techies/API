@@ -152,12 +152,17 @@ async def upload_dataset(
         local_path = os.path.join(user_upload_dir, f"{unique_id}.{ext}")
         with open(local_path, "wb") as f:
             f.write(file_bytes)
-        logger.info(f"Saved raw upload locally to: {local_path}")
+        
+        # 3. Validate file existence on disk before creating dataset record
+        if not os.path.exists(local_path) or not os.path.isfile(local_path) or os.path.getsize(local_path) == 0:
+            raise Exception("Local storage validation failed: File was not created successfully.")
+            
+        logger.info(f"Saved and validated raw upload locally at: {local_path}")
     except Exception as e:
-        logger.error(f"Failed to save temp file locally: {e}")
+        logger.error(f"Failed to save and validate temp file locally: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to store file: {str(e)}")
 
-    # 3. Create a pending dataset record in MongoDB
+    # 4. Create a pending dataset record in MongoDB
     doc = {
         "cloudinary_url": None,
         "public_id": None,
@@ -186,7 +191,7 @@ async def upload_dataset(
             os.remove(local_path)
         raise HTTPException(status_code=500, detail="Database insertion failed")
 
-    # 4. Define background task for Cloudinary upload & RAG indexing
+    # 5. Define background task for Cloudinary upload & RAG indexing
     async def process_upload_and_index_bg(dataset_doc: dict, file_content: bytes, filename: str, path: str):
         try:
             db_instance = get_db()
@@ -197,7 +202,7 @@ async def upload_dataset(
                 try:
                     logger.info(f"Background: Uploading {filename} to Cloudinary...")
                     from services.cloudinary_service import upload_file_to_cloudinary
-                    cloudinary_res = await upload_file_to_cloudinary(file_content, filename)
+                    cloudinary_res = await upload_file_to_cloudinary(file_content, filename, resource_type="raw")
                     logger.info("Background: Successfully uploaded dataset to Cloudinary.")
                 except Exception as upload_err:
                     logger.warning(f"Background: Cloudinary upload failed: {upload_err}. Staying with local path.")

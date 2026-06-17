@@ -28,7 +28,7 @@ else:
         "Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET. "
         "File uploads will fall back to local storage."
     )
-async def upload_file_to_cloudinary(file_bytes: bytes, file_name: str) -> dict:
+async def upload_file_to_cloudinary(file_bytes: bytes, file_name: str, resource_type: str = None) -> dict:
     """
     Upload file bytes to Cloudinary.
     Uses 'raw' resource type for tabular/text/pdf files to prevent image processing failure.
@@ -36,8 +36,11 @@ async def upload_file_to_cloudinary(file_bytes: bytes, file_name: str) -> dict:
     import asyncio
     
     ext = file_name.split(".")[-1].lower()
-    resource_type = "image" if ext in ("jpg", "jpeg", "png", "webp", "gif") else "raw"
-    logger.info(f"Cloudinary Upload: File extension '{ext}' identified. Using resource_type='{resource_type}' (required raw for csv/txt/pdf/docx)")
+    if not resource_type:
+        resource_type = "image" if ext in ("jpg", "jpeg", "png", "webp", "gif") else "raw"
+        logger.info(f"Cloudinary Upload: File extension '{ext}' identified. Auto resource_type='{resource_type}' (required raw for csv/txt/pdf/docx)")
+    else:
+        logger.info(f"Cloudinary Upload: Using explicit override resource_type='{resource_type}' for file '{file_name}'")
     
     def _upload():
         return cloudinary.uploader.upload(
@@ -60,5 +63,5 @@ async def upload_file_to_cloudinary(file_bytes: bytes, file_name: str) -> dict:
             "public_id": public_id,
         }
     except Exception as e:
-        logger.error(f"Cloudinary upload failed for '{file_name}': {e}")
+        logger.error(f"Cloudinary upload failed for '{file_name}': {e}", exc_info=True)
         raise

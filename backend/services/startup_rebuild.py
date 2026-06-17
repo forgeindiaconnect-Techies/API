@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime
 from database import get_db
 from auth.utils import get_id_query
 from services.chroma_service import collection_is_empty
@@ -35,7 +36,7 @@ async def run_rebuild_locally(dataset_id: str):
         logger.error(f"Local Rebuild: Failed to rebuild index for dataset {dataset_id}: {e}")
 
 async def run_startup_recovery():
-    """Verify all datasets in database, and queue their vector store indexes rebuild if empty."""
+    """Verify all datasets in database, and queue their vector store indexes rebuild if empty or interrupted."""
     logger.info("Starting startup RAG index recovery checks...")
     try:
         db = get_db()
@@ -43,44 +44,113 @@ async def run_startup_recovery():
             logger.warning("Database not connected, skipping startup RAG index recovery.")
             return
 
-        # Clean up stale "building" indexes: reset them to "failed" with an explanation
-        stale_indexes = await db.rag_indexes.update_many(
-            {"status": "building"},
-            {
-                "$set": {
-                    "status": "failed",
-                    "progress": 0.0,
-                    "error": "Index build was interrupted (server restart or memory limit exceeded)."
-                }
-            }
-        )
-        if stale_indexes.modified_count > 0:
-            logger.info(f"Startup recovery: Cleaned up {stale_indexes.modified_count} stale 'building' indexes and set their status to 'failed'.")
-
-        # Clean up stale "processing" datasets: reset them to "failed" with an explanation
-        stale_datasets = await db.datasets.update_many(
-            {"status": "processing"},
-            {
-                "$set": {
-                    "status": "failed",
-                    "error_message": "Dataset processing was interrupted (server restart or memory limit exceeded)."
-                }
-            }
-        )
-        if stale_datasets.modified_count > 0:
-            logger.info(f"Startup recovery: Cleaned up {stale_datasets.modified_count} stale 'processing' datasets and set their status to 'failed'.")
-
-        # Find all datasets with status 'indexed' or 'ready'
         rebuild_queue = []
+
+        # 1. Check for stale "processing" status datasets
+        stale_datasets_cursor = db.datasets.find({"status": "processing"})
+        async for dataset in stale_datasets_cursor:
+            dataset_id = str(dataset["_id"])
+            dataset_name = dataset.get('name') or dataset.get('file_name') or 'unknown'
+            
+            # Check if dataset has any backup
+            has_backup = bool(dataset.get("cloudinary_url") or dataset.get("secure_url") or dataset.get("gridfs_id"))
+            
+            if has_backup:
+                logger.info(
+                    f"Startup recovery: Dataset '{dataset_name}' ({dataset_id}) was interrupted in 'processing' "
+                    f"status, but has backup. Queueing for automatic reprocessing."
+                )
+                
+                # Reset dataset to "processing" and clear error
+                await db.datasets.update_one(
+                    {"_id": dataset["_id"]},
+                    {"$set": {"status": "processing", "error_message": None}}
+                )
+                
+                # Update or create RAG index document
+                index_doc = await db.rag_indexes.find_one({"dataset_id": dataset_id})
+                if index_doc:
+                    await db.rag_indexes.update_one(
+                        {"_id": index_doc["_id"]},
+                        {"$set": {"status": "building", "progress": 10.0, "error": None}}
+                    )
+                else:
+                    file_name = dataset.get("file_name") or dataset.get("name", "unknown")
+                    file_type = dataset.get("file_type") or file_name.split(".")[-1].lower()
+                    new_index = {
+                        "name": f"{file_name} index",
+                        "dataset_id": dataset_id,
+                        "embedding_model": "paraphrase-MiniLM-L3-v2",
+                        "chunk_size": 500 if file_type in ("txt", "md", "docx") else 512,
+                        "chunk_overlap": 100 if file_type in ("txt", "md", "docx") else 50,
+                        "index_type": "chroma",
+                        "chunk_count": 0,
+                        "status": "building",
+                        "progress": 10.0,
+                        "user_id": dataset.get("user_id", ""),
+                        "created_at": datetime.utcnow(),
+                    }
+                    await db.rag_indexes.insert_one(new_index)
+                
+                rebuild_queue.append(dataset_id)
+            else:
+                logger.warning(
+                    f"Startup recovery: Dataset '{dataset_name}' ({dataset_id}) was interrupted in 'processing' "
+                    f"status, but does not have any backup. Marking as failed."
+                )
+                await db.datasets.update_one(
+                    {"_id": dataset["_id"]},
+                    {"$set": {
+                        "status": "failed",
+                        "error_message": "Dataset processing was interrupted (server restart or memory limit exceeded) and no backup was found."
+                    }}
+                )
+                
+                # Also mark index as failed if it exists
+                await db.rag_indexes.update_many(
+                    {"dataset_id": dataset_id},
+                    {"$set": {
+                        "status": "failed",
+                        "progress": 0.0,
+                        "error": "Dataset processing was interrupted and no backup was found."
+                    }}
+                )
+
+        # 2. Check for stale "building" indexes for other datasets
+        stale_indexes_cursor = db.rag_indexes.find({"status": "building"})
+        async for index_doc in stale_indexes_cursor:
+            dataset_id = index_doc.get("dataset_id")
+            if not dataset_id:
+                continue
+            if dataset_id in rebuild_queue:
+                continue
+                
+            dataset = await db.datasets.find_one({"_id": get_id_query(dataset_id)})
+            if not dataset or dataset.get("status") not in ["indexed", "ready"]:
+                logger.info(f"Startup recovery: Cleaned up stale 'building' index {index_doc['_id']} (associated dataset status is not active).")
+                await db.rag_indexes.update_one(
+                    {"_id": index_doc["_id"]},
+                    {
+                        "$set": {
+                            "status": "failed",
+                            "progress": 0.0,
+                            "error": "Index build was interrupted (server restart or memory limit exceeded)."
+                        }
+                    }
+                )
+
+        # 3. Check for indexed or ready datasets
         datasets_cursor = db.datasets.find({"status": {"$in": ["indexed", "ready"]}})
         async for dataset in datasets_cursor:
             dataset_id = str(dataset["_id"])
+            if dataset_id in rebuild_queue:
+                continue
             
-            # Skip legacy datasets that do not have a Cloudinary URL
-            if not dataset.get("cloudinary_url"):
+            # Skip legacy datasets that do not have a Cloudinary or GridFS backup
+            if not dataset.get("cloudinary_url") and not dataset.get("secure_url") and not dataset.get("gridfs_id"):
                 logger.warning(
                     f"Startup recovery: Dataset '{dataset.get('name') or dataset.get('file_name')}' ({dataset_id}) "
-                    f"does not have a Cloudinary URL. Skipping automated index rebuild."
+                    f"does not have a Cloudinary URL or GridFS backup. Skipping automated index rebuild."
                 )
                 continue
 
@@ -98,14 +168,12 @@ async def run_startup_recovery():
             if is_empty:
                 logger.warning(
                     f"Startup recovery: RAG Index {index_id} for dataset '{dataset.get('name') or dataset.get('file_name')}' "
-                    f"is empty in ChromaDB. Queueing download and rebuild from Cloudinary..."
+                    f"is empty in ChromaDB. Queueing download and rebuild..."
                 )
-                # Clean up status in index document so search doesn't query a building index
                 await db.rag_indexes.update_one(
                     {"_id": index_doc["_id"]},
                     {"$set": {"status": "building", "error": None}}
                 )
-                # Queue index rebuilding
                 rebuild_queue.append(dataset_id)
             else:
                 logger.info(f"Startup recovery: Dataset '{dataset.get('name') or dataset.get('file_name')}' index {index_id} is verified healthy.")
@@ -115,11 +183,11 @@ async def run_startup_recovery():
 
         # Dispatch sequential index rebuilding to prevent concurrent SQLite locks
         if rebuild_queue:
-            logger.info(f"Startup recovery: Found {len(rebuild_queue)} empty vector stores to rebuild sequentially.")
+            logger.info(f"Startup recovery: Found {len(rebuild_queue)} empty vector stores/interrupted datasets to rebuild sequentially.")
             asyncio.create_task(run_sequential_rebuilds(rebuild_queue))
                 
     except Exception as e:
-        logger.error(f"Error during RAG startup recovery check: {e}")
+        logger.error(f"Error during RAG startup recovery check: {e}", exc_info=True)
 
 async def run_sequential_rebuilds(dataset_ids: list):
     """Rebuild indexes sequentially with warm-up delay to prevent SQLite lock collisions."""

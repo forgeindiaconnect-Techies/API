@@ -181,13 +181,19 @@ async def download_file_from_gridfs(dataset_doc: dict) -> str:
         raise
 
 async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
-    """Get the file path for the dataset. If local file is missing, validate cloudinary_url and download.
-    Fallback to GridFS backup if both fail. Returns (path, is_temp)."""
+    """Get the file path for the dataset using sequential recovery checks:
+    1. Local filesystem check
+    2. Cloudinary download recovery
+    3. GridFS download recovery
+    Returns (path, is_temp). Fails only after all options are exhausted."""
     local_path = dataset_doc.get("file_path")
-    cloudinary_url = dataset_doc.get("cloudinary_url")
+    cloudinary_url = dataset_doc.get("cloudinary_url") or dataset_doc.get("secure_url")
     gridfs_id = dataset_doc.get("gridfs_id")
+    dataset_id = str(dataset_doc.get("_id"))
+    file_name = dataset_doc.get("file_name") or dataset_doc.get("name", "unknown")
     
-    # 1. Check local path
+    # 1. Local filesystem check
+    logger.info(f"File Recovery: [1/3] Checking local filesystem for dataset '{file_name}' (ID: {dataset_id})...")
     local_exists = False
     resolved_local_path = None
     if local_path:
@@ -199,7 +205,7 @@ async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
         ]
         for p in paths_to_try:
             if os.path.exists(p) and os.path.isfile(p):
-                logger.info(f"Found local file at: {p}")
+                logger.info(f"✓ File Recovery: Found local file at: {p}")
                 local_exists = True
                 resolved_local_path = p
                 break
@@ -207,33 +213,38 @@ async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
     if local_exists and resolved_local_path:
         return resolved_local_path, False
 
-    # Local file is missing. Let's log it and attempt Cloudinary download.
-    logger.warning(f"Local file is missing at path: {local_path}. Checking Cloudinary backup...")
+    logger.warning(f"File Recovery: Local copy is missing at path '{local_path}'. Moving to Cloudinary recovery...")
     
-    # 2. Try Cloudinary download
+    # 2. Cloudinary download recovery
     if cloudinary_url:
         try:
+            logger.info(f"File Recovery: [2/3] Downloading dataset from Cloudinary URL: {cloudinary_url}")
             temp_path = await download_file_from_cloudinary(cloudinary_url)
+            logger.info(f"✓ File Recovery: Successfully recovered dataset from Cloudinary at: {temp_path}")
             return temp_path, True
-        except Exception as e:
-            logger.error(f"Failed to download Cloudinary URL: {e}. Checking GridFS backup...")
+        except Exception as cloud_err:
+            logger.error(f"File Recovery: Cloudinary download failed for dataset '{file_name}': {cloud_err}", exc_info=True)
+            logger.info("File Recovery: Cloudinary download failed. Moving to GridFS recovery...")
     else:
-        logger.warning(f"Cloudinary URL is not configured/present for dataset record '{dataset_doc.get('_id')}'")
+        logger.warning(f"File Recovery: [2/3] Cloudinary URL is missing for dataset '{file_name}' (ID: {dataset_id}). Moving to GridFS recovery...")
         
-    # 3. Check GridFS backup
+    # 3. GridFS download recovery
     if gridfs_id:
         try:
-            logger.info(f"Downloading dataset from GridFS (ID: {gridfs_id})...")
+            logger.info(f"File Recovery: [3/3] Downloading dataset from GridFS (ID: {gridfs_id})...")
             temp_path = await download_file_from_gridfs(dataset_doc)
+            logger.info(f"✓ File Recovery: Successfully recovered dataset from GridFS at: {temp_path}")
             return temp_path, True
-        except Exception as e:
-            logger.error(f"Failed to download from GridFS: {e}")
+        except Exception as grid_err:
+            logger.error(f"File Recovery: GridFS download failed for dataset '{file_name}' (ID: {dataset_id}): {grid_err}", exc_info=True)
+    else:
+        logger.warning(f"File Recovery: [3/3] GridFS backup ID is missing for dataset '{file_name}' (ID: {dataset_id}).")
 
     # Neither local file, Cloudinary, nor GridFS works. Raise detailed error message.
     raise Exception(
-        f"File Recovery Failure: The original file could not be located on the server, Cloudinary, or GridFS. "
-        f"This dataset was uploaded before persistent backups were implemented, and the local server cache has restarted. "
-        f"Please delete this dataset and upload it again."
+        f"File Recovery Failure: All recovery methods (local, Cloudinary, GridFS) have failed. "
+        f"The local file is missing, the Cloudinary URL is either missing or failed, "
+        f"and the GridFS backup is either missing or failed for dataset '{file_name}' (ID: {dataset_id})."
     )
 
 
