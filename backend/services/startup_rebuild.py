@@ -56,15 +56,42 @@ async def run_startup_recovery():
             has_backup = bool(dataset.get("cloudinary_url") or dataset.get("secure_url") or dataset.get("gridfs_id"))
             
             if has_backup:
+                recovery_attempts = dataset.get("recovery_attempts", 0)
+                if recovery_attempts >= 2:
+                    logger.error(
+                        f"Startup recovery: Dataset '{dataset_name}' ({dataset_id}) has failed recovery "
+                        f"{recovery_attempts} times. Marking as failed to prevent infinite crash loop."
+                    )
+                    await db.datasets.update_one(
+                        {"_id": dataset["_id"]},
+                        {"$set": {
+                            "status": "failed",
+                            "error_message": "Dataset processing failed repeatedly due to container resource limits (OOM/CPU timeout)."
+                        }}
+                    )
+                    # Also mark index as failed if it exists
+                    await db.rag_indexes.update_many(
+                        {"dataset_id": dataset_id},
+                        {"$set": {
+                            "status": "failed",
+                            "progress": 0.0,
+                            "error": "Dataset processing failed repeatedly due to container resource limits."
+                        }}
+                    )
+                    continue
+
                 logger.info(
                     f"Startup recovery: Dataset '{dataset_name}' ({dataset_id}) was interrupted in 'processing' "
-                    f"status, but has backup. Queueing for automatic reprocessing."
+                    f"status, but has backup. Queueing for automatic reprocessing (Attempt {recovery_attempts + 1})."
                 )
                 
-                # Reset dataset to "processing" and clear error
+                # Reset dataset to "processing", increment recovery_attempts
                 await db.datasets.update_one(
                     {"_id": dataset["_id"]},
-                    {"$set": {"status": "processing", "error_message": None}}
+                    {
+                        "$set": {"status": "processing", "error_message": None},
+                        "$inc": {"recovery_attempts": 1}
+                    }
                 )
                 
                 # Update or create RAG index document

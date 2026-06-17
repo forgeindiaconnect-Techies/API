@@ -501,6 +501,16 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             
             await asyncio.sleep(0.02)
 
+            # Force garbage collection to free memory during large batch indexing
+            import gc
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except ImportError:
+                pass
+
         logger.info(f"✓ All {total_chunks} chunks successfully embedded and stored in {index_type} (final count: {col_count})")
 
         # Step 6: Post-processing (EDA stats & preview generation)
@@ -529,7 +539,8 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
                 "stats": eda_res,
                 "preview": preview_res,
                 "processed_at": datetime.utcnow(),
-                "error_message": None
+                "error_message": None,
+                "recovery_attempts": 0
             }}
         )
         logger.info(f"Database Update: Status successfully changed to 'indexed' for dataset '{dataset_id}'.")

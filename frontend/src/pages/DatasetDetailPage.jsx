@@ -99,42 +99,71 @@ export default function DatasetDetailPage() {
   }, [id])
 
   useEffect(() => {
-    let intervalId;
+    let timeoutId;
+    let active = true;
     let secondsElapsed = 0;
-    
-    if (dataset && (dataset.status === 'processing' || reprocessing)) {
-      setPollingError(null);
-      intervalId = setInterval(async () => {
-        secondsElapsed += 2;
-        if (secondsElapsed > 60) {
-          clearInterval(intervalId);
-          setPollingError("Processing is taking longer than expected. Please refresh.");
+    let consecutiveErrors = 0;
+    let currentInterval = 2000; // start with 2s
+
+    const pollStatus = async () => {
+      if (!active) return;
+      
+      try {
+        const res = await datasetAPI.getStatus(id);
+        if (!active) return;
+        
+        // Reset error states on successful response
+        consecutiveErrors = 0;
+        currentInterval = 2000;
+        setPollingError(null);
+        
+        const currentStatus = res.data.status;
+        
+        if (currentStatus === 'completed' || currentStatus === 'ready' || currentStatus === 'indexed') {
+          setReprocessing(false);
+          loadData();
+          return;
+        } else if (currentStatus === 'failed' || currentStatus === 'error') {
+          setReprocessing(false);
+          setDataset(prev => prev ? { ...prev, status: 'failed', error_message: res.data.error_message || 'Processing failed' } : null);
+          return;
+        }
+      } catch (err) {
+        if (!active) return;
+        consecutiveErrors += 1;
+        console.error(`Error polling status (failures: ${consecutiveErrors}):`, err);
+        
+        // Exponential backoff: double the interval up to 10 seconds
+        currentInterval = Math.min(currentInterval * 2, 10000);
+        
+        const errMsg = err.response?.data?.detail || err.message || "Connection error";
+        
+        if (consecutiveErrors >= 3) {
+          setPollingError(`Backend server is currently unreachable (${errMsg}). Polling stopped.`);
           setReprocessing(false);
           return;
         }
-        
-        try {
-          const res = await datasetAPI.getStatus(id);
-          const currentStatus = res.data.status;
-          
-          if (currentStatus === 'completed' || currentStatus === 'ready' || currentStatus === 'indexed') {
-            clearInterval(intervalId);
-            setReprocessing(false);
-            setPollingError(null);
-            loadData();
-          } else if (currentStatus === 'failed' || currentStatus === 'error') {
-            clearInterval(intervalId);
-            setReprocessing(false);
-            setDataset(prev => prev ? { ...prev, status: 'failed', error_message: res.data.error_message || 'Processing failed' } : null);
-          }
-        } catch (err) {
-          console.error("Error polling status:", err);
-        }
-      }, 2000);
+      }
+      
+      // Check total timeout (limit to 3 minutes for larger datasets)
+      secondsElapsed += currentInterval / 1000;
+      if (secondsElapsed > 180) {
+        setPollingError("Processing is taking longer than expected. Please try refreshing the page later.");
+        setReprocessing(false);
+        return;
+      }
+      
+      timeoutId = setTimeout(pollStatus, currentInterval);
+    };
+
+    if (dataset && (dataset.status === 'processing' || reprocessing)) {
+      setPollingError(null);
+      timeoutId = setTimeout(pollStatus, currentInterval);
     }
-    
+
     return () => {
-      if (intervalId) clearInterval(intervalId);
+      active = false;
+      if (timeoutId) clearTimeout(timeoutId);
     };
   }, [dataset?.status, reprocessing, id]);
 

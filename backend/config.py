@@ -85,6 +85,7 @@ class Settings(BaseSettings):
         default="http://localhost:3000,http://localhost:5173",
         validation_alias=AliasChoices("CORS_ORIGINS", "ALLOWED_ORIGINS")
     )
+    FRONTEND_URL: Optional[str] = None
 
     # Rate Limiting
     RATE_LIMIT_PER_MINUTE: int = 60
@@ -182,9 +183,16 @@ class Settings(BaseSettings):
 
     @property
     def allowed_origins_list(self) -> List[str]:
-        if not self.ALLOWED_ORIGINS:
-            return ["*"]
-        return [o.strip() for o in self.ALLOWED_ORIGINS.split(",") if o.strip()]
+        origins = ["http://localhost:3000", "http://localhost:5173"]
+        if self.ALLOWED_ORIGINS:
+            origins.extend([o.strip() for o in self.ALLOWED_ORIGINS.split(",") if o.strip()])
+        if self.FRONTEND_URL:
+            origins.append(self.FRONTEND_URL.strip())
+        # Add Vercel production URLs explicitly to guarantee they are allowed
+        origins.append("https://api-one-coral-62.vercel.app")
+        origins.append("https://d-ai-nu.vercel.app")
+        # Remove duplicates
+        return list(set(origins))
 
     @model_validator(mode="after")
     def set_redis_defaults(self) -> 'Settings':

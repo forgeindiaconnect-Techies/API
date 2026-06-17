@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, Body
 from datetime import datetime
 from typing import List, Optional
 from bson import ObjectId
@@ -61,7 +61,18 @@ async def fetch_user_dataset_or_raise(dataset_id: str, current_user: dict) -> di
         raise HTTPException(status_code=500, detail="Database connection unavailable")
 
     user_query = get_user_query(current_user)
-    d = await db.datasets.find_one({"_id": id_query, "user_id": user_query})
+    try:
+        async def fetch_doc():
+            return await db.datasets.find_one({"_id": id_query, "user_id": user_query})
+            
+        d = await asyncio.wait_for(fetch_doc(), timeout=4.0)
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout (4s) exceeded while fetching dataset {dataset_id} for user: {current_user.get('_id')}")
+        raise HTTPException(status_code=504, detail="Database query timed out. Please try again.")
+    except Exception as e:
+        logger.error(f"Database query failed in fetch_user_dataset_or_raise: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Database query failed: {str(e)}")
+
     if not d:
         logger.warning(f"Dataset not found or unauthorized: ID={dataset_id}, User={current_user.get('_id')}")
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -434,7 +445,7 @@ def _generate_preview(temp_path: str, ext: str, rows: int = 20) -> dict:
 async def reprocess_dataset(
     dataset_id: str,
     background_tasks: BackgroundTasks,
-    options: Optional[ProcessingOptions] = None,
+    options: Optional[ProcessingOptions] = Body(None),
     current_user=Depends(get_current_user),
 ):
     d = await fetch_user_dataset_or_raise(dataset_id, current_user)
@@ -443,7 +454,14 @@ async def reprocess_dataset(
         logger.error("Database connection wrapper is None")
         raise HTTPException(status_code=500, detail="Database connection unavailable")
         
-    await db.datasets.update_one({"_id": d["_id"]}, {"$set": {"status": "processing", "error_message": None}})
+    await db.datasets.update_one(
+        {"_id": d["_id"]},
+        {"$set": {
+            "status": "processing",
+            "error_message": None,
+            "recovery_attempts": 0
+        }}
+    )
     
     # Reprocessing a failed/completed dataset should rebuild its RAG index as well to make it fully functional.
     from services.dataset_service import build_index_for_dataset
