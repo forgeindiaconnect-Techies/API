@@ -216,8 +216,11 @@ app.add_middleware(RequestLoggingMiddleware)
 # 4. CORSMiddleware (outer-most, handles preflight OPTIONS requests directly)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.allowed_origins_list,
-    allow_origin_regex="https://.*\\.vercel\\.app",
+    allow_origins=list(set([
+        "https://api-one-coral-62.vercel.app",
+        "http://localhost:5173",
+        "http://localhost:3000",
+    ] + settings.allowed_origins_list)),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

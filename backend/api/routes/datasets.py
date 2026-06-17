@@ -478,30 +478,71 @@ async def get_dataset_status(
     dataset_id: str,
     current_user=Depends(get_current_user)
 ):
-    d = await fetch_user_dataset_or_raise(dataset_id, current_user)
-    
-    # Progress estimation:
-    # "completed" -> 100
-    # "ready", "indexed" -> 100
-    # "processing" -> 50
-    # "failed", "error" -> 0
-    # others -> 10
-    status = d.get("status", "pending")
-    progress = 0
-    if status in ("completed", "ready", "indexed"):
-        progress = 100
-    elif status == "processing":
-        progress = 50
-    elif status in ("failed", "error"):
+    logger.info(f"Checking dataset status: {dataset_id}")
+    try:
+        # 1. Verify MongoDB Connection
+        db = get_db()
+        if db is None:
+            raise Exception("MongoDB connection unavailable")
+        await db.command("ping")
+
+        # 2. Verify Dataset record exists and current user has access
+        d = await fetch_user_dataset_or_raise(dataset_id, current_user)
+
+        # 3. Verify ChromaDB Connection
+        from services.chroma_service import ChromaManager
+        chroma_client = await asyncio.to_thread(ChromaManager.get_client)
+        if chroma_client is None:
+            raise Exception("ChromaDB client is unavailable")
+        await asyncio.to_thread(chroma_client.heartbeat)
+
+        # 4. Verify Background task status and dataset status field values
+        index_doc = await db.rag_indexes.find_one({"dataset_id": dataset_id})
+
+        status = d.get("status", "pending")
         progress = 0
-    else:
-        progress = 10
-        
-    return {
-        "status": status,
-        "progress": progress,
-        "error_message": d.get("error_message")
-    }
+        error_message = d.get("error_message")
+
+        if index_doc:
+            index_status = index_doc.get("status")
+            index_progress = index_doc.get("progress", 0.0)
+            index_error = index_doc.get("error")
+
+            if status == "processing":
+                progress = index_progress if index_progress is not None else 50
+                if index_status == "failed":
+                    status = "failed"
+                    error_message = index_error or "Background indexing task failed."
+            elif status in ("completed", "ready", "indexed") or index_status == "ready":
+                progress = 100
+            elif status in ("failed", "error") or index_status == "failed":
+                progress = 0
+                status = "failed"
+                error_message = error_message or index_error or "Indexing task failed."
+        else:
+            if status in ("completed", "ready", "indexed"):
+                progress = 100
+            elif status == "processing":
+                progress = 50
+            elif status in ("failed", "error"):
+                progress = 0
+            else:
+                progress = 10
+
+        return {
+            "status": status,
+            "progress": progress,
+            "error_message": error_message,
+            "mongodb_connected": True,
+            "chromadb_connected": True
+        }
+
+    except Exception as e:
+        logger.exception("Dataset status failed")
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 
 @router.get("/{dataset_id}/eda")
