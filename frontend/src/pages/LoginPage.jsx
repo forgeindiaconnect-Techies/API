@@ -544,15 +544,7 @@ export default function LoginPage() {
               </button>
             </form>
 
-            {/* Splitter */}
-            <div className="relative flex items-center justify-center">
-              <div className="absolute inset-0 flex items-center">
-                <div className="w-full border-t border-white/[0.05]" />
-              </div>
-              <span className="relative px-3 bg-[#0d101b] text-[10px] font-bold text-gray-600 tracking-wider uppercase">
-                Consensus via
-              </span>
-            </div>
+
 
             {/* OAuth buttons & Demo */}
             <div className="space-y-2.5">
