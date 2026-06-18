@@ -6,7 +6,6 @@ import os
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
 from config import settings
-import chromadb
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +14,8 @@ class ChromaManager:
 
     @classmethod
     def get_client(cls):
-        if cls._client is None:
+        import chromadb
+        if cls._client is None or getattr(cls._client, "_closed", False):
             logger.info(f"Initializing singleton ChromaDB PersistentClient at path: {settings.CHROMA_PERSIST_DIR} (Telemetry: Disabled)")
             from chromadb.config import Settings
             cls._client = chromadb.PersistentClient(
@@ -23,6 +23,17 @@ class ChromaManager:
                 settings=Settings(anonymized_telemetry=False)
             )
         return cls._client
+
+    @classmethod
+    def close_client(cls):
+        if cls._client is not None:
+            try:
+                cls._client.close()
+                logger.info("ChromaDB PersistentClient closed successfully.")
+            except Exception as e:
+                logger.error(f"Error closing ChromaDB client: {e}")
+            finally:
+                cls._client = None
 
 async def run_with_retry_async(func, *args, **kwargs):
     """

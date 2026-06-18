@@ -334,6 +334,38 @@ class MockVectorCollection:
         return len(self._data)
 
 
+class GeminiEmbedder:
+    """Google Gemini embedding wrapper compatible with the sentence-transformers encode API"""
+    def __init__(self, api_key: str):
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        self.model = "models/gemini-embedding-001"
+
+    def encode(self, texts, **kwargs):
+        import numpy as np
+        import google.generativeai as genai
+        
+        is_single = isinstance(texts, str)
+        if is_single:
+            texts = [texts]
+            
+        try:
+            response = genai.embed_content(
+                model=self.model,
+                content=texts,
+                task_type="retrieval_document"
+            )
+            embeddings = response.get("embedding", [])
+            
+            res = np.array(embeddings, dtype="float32")
+            if is_single:
+                return res[0]
+            return res
+        except Exception as e:
+            logger.error(f"GeminiEmbedder generation failed: {e}")
+            raise
+
+
 class OpenAIEmbedder:
     """OpenAI embedding wrapper compatible with the sentence-transformers encode API"""
     def __init__(self, api_key: str):
@@ -412,11 +444,21 @@ def get_embedding_model(model_name: str = "paraphrase-MiniLM-L3-v2"):
     if model_name == "all-MiniLM-L6-v2":
         model_name = "paraphrase-MiniLM-L3-v2"
 
+    # 0.5 Try Google Gemini if API key is present
+    gemini_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY")
+    if gemini_key and not gemini_key.startswith("your-"):
+        try:
+            logger.info("Initializing GeminiEmbedder...")
+            return GeminiEmbedder(api_key=gemini_key)
+        except Exception as e:
+            logger.error(f"Failed to initialize GeminiEmbedder: {e}. Falling back to OpenAI/SentenceTransformer.")
+
     # 1. Try OpenAI if API key is present
-    if settings.OPENAI_API_KEY and not settings.OPENAI_API_KEY.startswith("sk-..."):
+    openai_key = settings.OPENAI_API_KEY or os.environ.get("OPENAI_API_KEY")
+    if openai_key and not openai_key.startswith("sk-..."):
         try:
             logger.info("Initializing OpenAIEmbedder...")
-            return OpenAIEmbedder(api_key=settings.OPENAI_API_KEY)
+            return OpenAIEmbedder(api_key=openai_key)
         except Exception as e:
             logger.error(f"Failed to initialize OpenAIEmbedder: {e}. Falling back to SentenceTransformer.")
 

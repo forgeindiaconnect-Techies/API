@@ -77,8 +77,15 @@ class Settings(BaseSettings):
     CLOUDINARY_API_KEY: str = ""
     CLOUDINARY_API_SECRET: str = ""
 
+    # AWS S3
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    AWS_REGION_NAME: str = "us-east-1"
+    AWS_S3_BUCKET: str = ""
+
     # ChromaDB
     CHROMA_PERSIST_DIR: str = "./chroma_db"
+    EMBEDDING_BATCH_SIZE: int = 20
 
     # CORS
     ALLOWED_ORIGINS: str = Field(
@@ -158,6 +165,7 @@ class Settings(BaseSettings):
         "REFRESH_TOKEN_EXPIRE_DAYS",
         "MAX_UPLOAD_SIZE_MB",
         "RATE_LIMIT_PER_MINUTE",
+        "EMBEDDING_BATCH_SIZE",
         mode="before"
     )
     @classmethod
@@ -167,7 +175,8 @@ class Settings(BaseSettings):
                 "ACCESS_TOKEN_EXPIRE_MINUTES": 60,
                 "REFRESH_TOKEN_EXPIRE_DAYS": 30,
                 "MAX_UPLOAD_SIZE_MB": 500,
-                "RATE_LIMIT_PER_MINUTE": 60
+                "RATE_LIMIT_PER_MINUTE": 60,
+                "EMBEDDING_BATCH_SIZE": 20
             }
             return defaults.get(info.field_name, 60)
         try:
@@ -177,7 +186,8 @@ class Settings(BaseSettings):
                 "ACCESS_TOKEN_EXPIRE_MINUTES": 60,
                 "REFRESH_TOKEN_EXPIRE_DAYS": 30,
                 "MAX_UPLOAD_SIZE_MB": 500,
-                "RATE_LIMIT_PER_MINUTE": 60
+                "RATE_LIMIT_PER_MINUTE": 60,
+                "EMBEDDING_BATCH_SIZE": 20
             }
             return defaults.get(info.field_name, 60)
 

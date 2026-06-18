@@ -8,10 +8,10 @@ services:
     plan: standard # Standard or higher recommended for memory overhead
     region: oregon # Render region
     numInstances: 1
-    healthCheckPath: /api/health
+    healthCheckPath: /health
     envVars:
       - key: PORT
-        value: 8000
+        value: 10000
       - key: ENVIRONMENT
         value: production
       - key: DEBUG
@@ -40,6 +40,16 @@ services:
         sync: false # OpenAI fallback token (highly recommended for production fallback)
       - key: GEMINI_API_KEY
         sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_REGION_NAME
+        value: ap-south-1
+      - key: AWS_S3_BUCKET
+        value: my-ai-datasets-danish-2026
+      - key: EMBEDDING_BATCH_SIZE
+        value: "20"
       - key: CLOUDINARY_CLOUD_NAME
         sync: false
       - key: CLOUDINARY_API_KEY
@@ -98,6 +108,16 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_REGION_NAME
+        value: ap-south-1
+      - key: AWS_S3_BUCKET
+        value: my-ai-datasets-danish-2026
+      - key: EMBEDDING_BATCH_SIZE
+        value: "20"
       - key: CLOUDINARY_CLOUD_NAME
         sync: false
       - key: CLOUDINARY_API_KEY

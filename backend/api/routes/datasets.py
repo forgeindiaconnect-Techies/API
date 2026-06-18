@@ -216,14 +216,39 @@ async def upload_dataset(
         gridfs_err_msg = str(gridfs_err)
         logger.error(f"GridFS backup failed: {gridfs_err}")
 
-    # 6. Validation: if BOTH failed, raise HTTPException and delete local file
-    if not cloudinary_res and not gridfs_id:
+    # 5.5 AWS S3 upload
+    s3_res = None
+    s3_err_msg = None
+    if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY and settings.AWS_S3_BUCKET:
+        try:
+            logger.info(f"Backing up {file.filename} to AWS S3...")
+            from services.s3_service import upload_file_to_s3
+            content_type = "application/octet-stream"
+            if ext == "txt":
+                content_type = "text/plain"
+            elif ext == "csv":
+                content_type = "text/csv"
+            elif ext == "pdf":
+                content_type = "application/pdf"
+            elif ext == "json":
+                content_type = "application/json"
+            s3_res = await upload_file_to_s3(file_bytes, file.filename, content_type)
+            logger.info(f"AWS S3 upload succeeded. Key: {s3_res.get('s3_key')}")
+        except Exception as s3_err:
+            s3_err_msg = str(s3_err)
+            logger.error(f"AWS S3 backup failed: {s3_err}")
+    else:
+        s3_err_msg = "AWS S3 credentials not configured"
+        logger.warning("AWS S3 credentials not configured. Skipping S3 upload.")
+
+    # 6. Validation: if ALL failed, raise HTTPException and delete local file
+    if not cloudinary_res and not gridfs_id and not s3_res:
         if os.path.exists(local_path):
             os.remove(local_path)
-        logger.error(f"Validation Failed: Both Cloudinary and GridFS backups failed. Cloudinary error: {cloudinary_err_msg}. GridFS error: {gridfs_err_msg}.")
+        logger.error(f"Validation Failed: All backup targets (Cloudinary, GridFS, AWS S3) failed. Cloudinary: {cloudinary_err_msg}. GridFS: {gridfs_err_msg}. S3: {s3_err_msg}.")
         raise HTTPException(
             status_code=500,
-            detail=f"Storage persistence failed. Both Cloudinary and GridFS backup attempts failed. Cloudinary: {cloudinary_err_msg}. GridFS: {gridfs_err_msg}."
+            detail=f"Storage persistence failed. Cloudinary: {cloudinary_err_msg}. GridFS: {gridfs_err_msg}. S3: {s3_err_msg}."
         )
 
     # 7. Create a dataset record in MongoDB
@@ -235,9 +260,11 @@ async def upload_dataset(
 
     doc = {
         "cloudinary_url": sec_url,
-        "secure_url": sec_url,
+        "secure_url": sec_url or (s3_res.get("s3_url") if s3_res else None),
         "public_id": public_id,
         "gridfs_id": gridfs_id,
+        "s3_key": s3_res.get("s3_key") if s3_res else None,
+        "s3_url": s3_res.get("s3_url") if s3_res else None,
         "file_path": local_path,
         "file_name": file.filename,
         "name": file.filename,
@@ -347,6 +374,16 @@ async def delete_dataset(dataset_id: str, current_user=Depends(get_current_user)
             logger.info(f"Deleted GridFS file {gridfs_id} for dataset {dataset_id}")
         except Exception as e:
             logger.error(f"Failed to delete GridFS file {gridfs_id}: {e}")
+
+    # 3.6 Delete from AWS S3
+    s3_key = d.get("s3_key")
+    if s3_key:
+        try:
+            from services.s3_service import delete_file_from_s3
+            await delete_file_from_s3(s3_key)
+            logger.info(f"Deleted AWS S3 file {s3_key} for dataset {dataset_id}")
+        except Exception as e:
+            logger.error(f"Failed to delete AWS S3 file {s3_key}: {e}")
 
     # 4. Delete the dataset document from MongoDB
     await db.datasets.delete_one({"_id": d["_id"]})

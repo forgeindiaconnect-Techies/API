@@ -217,11 +217,13 @@ Generate a natural language response."""
         
     # B: Try Google Gemini fallback if Ollama is unavailable
     if not llm_connected:
-        if settings.GEMINI_API_KEY and not settings.GEMINI_API_KEY.startswith("your-"):
+        import os
+        gemini_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY")
+        if gemini_key and not gemini_key.startswith("your-"):
             try:
                 logger.info("Attempting Google Gemini fallback (gemini-2.5-flash)...")
                 import google.generativeai as genai
-                genai.configure(api_key=settings.GEMINI_API_KEY)
+                genai.configure(api_key=gemini_key)
                 model_instance = genai.GenerativeModel("gemini-2.5-flash")
                 
                 try:
@@ -245,9 +247,11 @@ Generate a natural language response."""
 
     # C: Try OpenAI fallback if Gemini is unavailable or fails
     if not llm_connected:
-        if settings.OPENAI_API_KEY and not settings.OPENAI_API_KEY.startswith("sk-..."):
+        import os
+        openai_key = settings.OPENAI_API_KEY or os.environ.get("OPENAI_API_KEY")
+        if openai_key and not openai_key.startswith("sk-..."):
             try:
-                openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+                openai_client = AsyncOpenAI(api_key=openai_key)
                 res = await openai_client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[{"role": "user", "content": prompt}],

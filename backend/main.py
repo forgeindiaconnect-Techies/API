@@ -90,6 +90,33 @@ def acquire_startup_lock() -> bool:
         return False
 
 
+startup_status = {
+    "mongodb": False,
+    "aws_s3": False,
+    "chromadb": False,
+    "ready": False
+}
+
+
+def safe_print(msg: str):
+    import sys
+    try:
+        print(msg, flush=True)
+    except UnicodeEncodeError:
+        try:
+            if hasattr(sys.stdout, "reconfigure"):
+                sys.stdout.reconfigure(encoding='utf-8')
+                print(msg, flush=True)
+            else:
+                raise
+        except Exception:
+            ascii_msg = msg.replace("✅", "[OK]").replace("🚀", "[STARTUP]").replace("❌", "[FAIL]")
+            try:
+                print(ascii_msg, flush=True)
+            except Exception:
+                pass
+
+
 async def initialize_app_bg():
     import time
     start_time = time.time()
@@ -98,11 +125,16 @@ async def initialize_app_bg():
     
     # 1. Connect to MongoDB
     try:
-        await connect_db()
-        # Immediately sync JWT secrets to ensure consistent session signatures across container restarts
-        from database import get_db
+        await asyncio.wait_for(connect_db(), timeout=5.0)
         db = get_db()
         if db is not None:
+            # Ping database to confirm active status
+            await db._db.command("ping")
+            startup_status["mongodb"] = True
+            safe_print("✅ MongoDB Connected")
+            logger.info("✅ MongoDB Connected")
+            
+            # Immediately sync JWT secrets to ensure consistent session signatures across container restarts
             try:
                 from datetime import datetime
                 config_doc = await db.system_config.find_one({"key": "jwt_secrets"})
@@ -121,28 +153,75 @@ async def initialize_app_bg():
                     logger.info("Initialized and persisted new JWT secrets to MongoDB Atlas.")
             except Exception as config_err:
                 logger.error(f"Failed to sync JWT secrets with MongoDB: {config_err}")
+        else:
+            logger.error("MongoDB connected but db is None.")
     except Exception as e:
-        logger.error(f"Startup MongoDB connection failed: {e}")
+        logger.error(f"Startup MongoDB connection failed or timed out: {e}")
+        # Fallback MockDB is active inside database.py
+        startup_status["mongodb"] = False
+        safe_print(f"❌ MongoDB Connection Failed: {e}")
         
     db_conn_time = time.time()
     logger.info(f"MongoDB connection time: {db_conn_time - start_time:.2f}s (Memory: {get_rss_memory_mb():.2f} MB)")
     
+    # 2. Check AWS S3 with timeout
+    s3_configured = bool(settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY and settings.AWS_S3_BUCKET)
+    if s3_configured:
+        try:
+            import boto3
+            def _check_s3():
+                s3_client = boto3.client(
+                    "s3",
+                    aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+                    aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+                    region_name=settings.AWS_REGION_NAME
+                )
+                s3_client.head_bucket(Bucket=settings.AWS_S3_BUCKET)
+            await asyncio.wait_for(asyncio.to_thread(_check_s3), timeout=5.0)
+            startup_status["aws_s3"] = True
+            safe_print("✅ AWS S3 Connected")
+            logger.info("✅ AWS S3 Connected")
+        except Exception as e:
+            logger.error(f"AWS S3 connection check failed or timed out: {e}")
+            startup_status["aws_s3"] = False
+            safe_print(f"❌ AWS S3 Connection Failed: {e}")
+    else:
+        logger.warning("AWS credentials or S3 bucket not configured.")
+        startup_status["aws_s3"] = True
+        safe_print("✅ AWS S3 Connected (Not Configured / Local Fallback)")
+
+    # 3. Check ChromaDB with timeout
+    try:
+        from services.chroma_service import ChromaManager
+        def _check_chroma():
+            client = ChromaManager.get_client()
+            if client is not None:
+                client.heartbeat()
+                return True
+            return False
+        chroma_ok = await asyncio.wait_for(asyncio.to_thread(_check_chroma), timeout=5.0)
+        if chroma_ok:
+            startup_status["chromadb"] = True
+            safe_print("✅ ChromaDB Connected")
+            logger.info("✅ ChromaDB Connected")
+        else:
+            logger.error("ChromaDB get_client returned None.")
+            startup_status["chromadb"] = False
+            safe_print("❌ ChromaDB Connection Failed")
+    except Exception as e:
+        logger.error(f"ChromaDB connection check failed or timed out: {e}")
+        startup_status["chromadb"] = False
+        safe_print(f"❌ ChromaDB Connection Failed: {e}")
+
     # Check worker lock to avoid duplicate loading across multiple workers
     if not acquire_startup_lock():
         logger.info("Skipping heavy initialization tasks (model pre-load, RAG recovery) for this worker.")
+        startup_status["ready"] = True
+        safe_print("🚀 Application Ready")
+        logger.info("🚀 Application Ready")
         return
 
-    # Add a delay to let the server bind the port and become healthy first
-    delay_sec = 10
-    logger.info(f"Delaying heavy initialization tasks by {delay_sec} seconds to ensure immediate API port binding...")
-    await asyncio.sleep(delay_sec)
-    
-    # 2. Lazy Model Loading: The embedding model will be loaded lazily on demand
-    # instead of pre-loading at startup to stay within the 512MB RAM Render Free Tier limit.
-    logger.info("Bypassing startup model pre-loading to optimize memory usage (lazy loading is active).")
-
-
-    # 3. RAG index startup recovery check
+    # 4. RAG index startup recovery check
     logger.info("Starting RAG startup recovery checks...")
     recovery_start = time.time()
     try:
@@ -156,6 +235,10 @@ async def initialize_app_bg():
     total_time = time.time() - start_time
     final_mem = get_rss_memory_mb()
     logger.info(f"Background app initialization completed in {total_time:.2f}s. Final Memory: {final_mem:.2f} MB (Delta: {final_mem - initial_mem:.2f} MB)")
+    
+    startup_status["ready"] = True
+    safe_print("🚀 Application Ready")
+    logger.info("🚀 Application Ready")
 
 
 @asynccontextmanager
@@ -310,14 +393,16 @@ async def root(request: Request):
     }
 
 
+@app.api_route("/health", methods=["GET", "HEAD"])
 @app.api_route("/api/health", methods=["GET", "HEAD"])
 async def health(request: Request):
     if request.method == "HEAD":
         return Response(status_code=200)
     return {
         "status": "healthy",
-        "version": settings.APP_VERSION,
-        "environment": settings.ENVIRONMENT,
+        "mongodb": startup_status["mongodb"],
+        "aws_s3": startup_status["aws_s3"],
+        "service": "running"
     }
 
 
@@ -634,4 +719,15 @@ async def public_audio_transcribe(
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+
+
+if __name__ == "__main__":
+    import uvicorn
+    import os
+    port = int(os.getenv("PORT", 8000))
+    safe_print("✅ FastAPI Server Started")
+    safe_print(f"PORT value: {port}")
+    logger.info("✅ FastAPI Server Started")
+    logger.info(f"PORT value: {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
 

@@ -3,9 +3,6 @@ import tempfile
 import httpx
 import logging
 import re
-import pandas as pd
-import PyPDF2
-import docx
 import json
 import asyncio
 from datetime import datetime
@@ -38,14 +35,29 @@ async def extract_text_from_file(file_path: str, file_type: str) -> list:
     """Extract chunks or rows of text from the downloaded file."""
     chunks = []
     if file_type in ("csv", "xlsx", "xls"):
+        import pandas as pd
         if file_type == "csv":
-            df = pd.read_csv(file_path)
+            logger.info(f"Memory optimization: Reading CSV '{file_path}' in chunks of 1000 rows.")
+            import gc
+            for chunk_df in pd.read_csv(file_path, chunksize=1000):
+                for i, row in chunk_df.iterrows():
+                    row_str = ", ".join([f"{col}: {val}" for col, val in row.items() if pd.notnull(val)])
+                    if row_str.strip():
+                        chunks.append(row_str)
+                del chunk_df
+                gc.collect()
         else:
+            logger.info(f"Memory optimization: Reading Excel file '{file_path}'...")
+            import gc
             df = pd.read_excel(file_path)
-        for i, row in df.iterrows():
-            row_str = ", ".join([f"{col}: {val}" for col, val in row.items() if pd.notnull(val)])
-            chunks.append(row_str)
+            for i, row in df.iterrows():
+                row_str = ", ".join([f"{col}: {val}" for col, val in row.items() if pd.notnull(val)])
+                if row_str.strip():
+                    chunks.append(row_str)
+            del df
+            gc.collect()
     elif file_type == "pdf":
+        import PyPDF2
         with open(file_path, "rb") as f:
             reader = PyPDF2.PdfReader(f)
             for page_num in range(len(reader.pages)):
@@ -63,6 +75,7 @@ async def extract_text_from_file(file_path: str, file_type: str) -> list:
             if chunk.strip():
                 chunks.append(chunk)
     elif file_type == "docx":
+        import docx
         doc = docx.Document(file_path)
         paragraphs = [p.text for p in doc.paragraphs if p.text]
         text = "\n".join(paragraphs)
@@ -194,6 +207,8 @@ async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
     
     local_detail = f"path '{local_path}' is missing or not a file"
     cloudinary_detail = "missing"
+    s3_key = dataset_doc.get("s3_key")
+    s3_detail = "missing"
     gridfs_detail = "missing"
     
     # 1. Local filesystem check
@@ -233,10 +248,25 @@ async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
     else:
         logger.warning(f"File Recovery: [2/3] Cloudinary URL is missing for dataset '{file_name}' (ID: {dataset_id}). Moving to GridFS recovery...")
         
-    # 3. GridFS download recovery
+    # 3. AWS S3 download recovery
+    if s3_key:
+        try:
+            logger.info(f"File Recovery: [3/4] Downloading dataset from AWS S3 key: {s3_key}")
+            from services.s3_service import download_file_from_s3
+            temp_path = await download_file_from_s3(s3_key, suffix="." + file_type)
+            logger.info(f"✓ File Recovery: Successfully recovered dataset from AWS S3 at: {temp_path}")
+            return temp_path, True
+        except Exception as s3_err:
+            s3_detail = f"failed: {str(s3_err)}"
+            logger.error(f"File Recovery: AWS S3 download failed for dataset '{file_name}': {s3_err}", exc_info=True)
+            logger.info("File Recovery: AWS S3 download failed. Moving to GridFS recovery...")
+    else:
+        logger.warning(f"File Recovery: [3/4] AWS S3 key is missing for dataset '{file_name}' (ID: {dataset_id}). Moving to GridFS recovery...")
+
+    # 4. GridFS download recovery
     if gridfs_id:
         try:
-            logger.info(f"File Recovery: [3/3] Downloading dataset from GridFS (ID: {gridfs_id})...")
+            logger.info(f"File Recovery: [4/4] Downloading dataset from GridFS (ID: {gridfs_id})...")
             temp_path = await download_file_from_gridfs(dataset_doc)
             logger.info(f"✓ File Recovery: Successfully recovered dataset from GridFS at: {temp_path}")
             return temp_path, True
@@ -244,13 +274,14 @@ async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
             gridfs_detail = f"failed: {str(grid_err)}"
             logger.error(f"File Recovery: GridFS download failed for dataset '{file_name}' (ID: {dataset_id}): {grid_err}", exc_info=True)
     else:
-        logger.warning(f"File Recovery: [3/3] GridFS backup ID is missing for dataset '{file_name}' (ID: {dataset_id}).")
+        logger.warning(f"File Recovery: [4/4] GridFS backup ID is missing for dataset '{file_name}' (ID: {dataset_id}).")
 
-    # Neither local file, Cloudinary, nor GridFS works. Raise detailed error message.
+    # Neither local file, Cloudinary, AWS S3, nor GridFS works. Raise detailed error message.
     raise Exception(
-        f"File Recovery Failure: All recovery methods (local, Cloudinary, GridFS) have failed. "
+        f"File Recovery Failure: All recovery methods (local, Cloudinary, AWS S3, GridFS) have failed. "
         f"The local file is missing ({local_detail}). "
         f"Cloudinary retrieval was {cloudinary_detail}. "
+        f"AWS S3 retrieval was {s3_detail}. "
         f"GridFS retrieval was {gridfs_detail} for dataset '{file_name}' (ID: {dataset_id})."
     )
 
@@ -267,6 +298,9 @@ def validate_environment_variables():
         "CLOUDINARY_CLOUD_NAME": settings.CLOUDINARY_CLOUD_NAME or os.environ.get("CLOUDINARY_CLOUD_NAME"),
         "CLOUDINARY_API_KEY": settings.CLOUDINARY_API_KEY or os.environ.get("CLOUDINARY_API_KEY"),
         "CLOUDINARY_API_SECRET": settings.CLOUDINARY_API_SECRET or os.environ.get("CLOUDINARY_API_SECRET"),
+        "AWS_ACCESS_KEY_ID": settings.AWS_ACCESS_KEY_ID or os.environ.get("AWS_ACCESS_KEY_ID"),
+        "AWS_SECRET_ACCESS_KEY": settings.AWS_SECRET_ACCESS_KEY or os.environ.get("AWS_SECRET_ACCESS_KEY"),
+        "AWS_S3_BUCKET": settings.AWS_S3_BUCKET or os.environ.get("AWS_S3_BUCKET"),
     }
     
     logger.info("=== Validating Environment Variables ===")
@@ -428,7 +462,7 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             logger.info("Verification: Cloudinary configuration is empty; Cloudinary URL is not required.")
 
         # Batch Processing: Embeddings Generation and Vector store insertions
-        batch_size = 50
+        batch_size = getattr(settings, "EMBEDDING_BATCH_SIZE", 20)
         total_chunks = len(chunks)
         logger.info(f"Starting batched embedding generation and vector store insertion (batch size: {batch_size}, total: {total_chunks} chunks)...")
 
@@ -459,17 +493,26 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             batch_ids = ids[i:i+batch_size]
             batch_metadatas = metadatas[i:i+batch_size]
 
-            # 1. Embedding generation for batch
-            logger.info(f"Generating embeddings for batch of {len(batch_chunks)} chunks (range {i} to {i+len(batch_chunks)})...")
-            try:
-                if asyncio.iscoroutinefunction(embedder.encode):
-                    batch_embeds = await embedder.encode(batch_chunks)
-                else:
-                    batch_embeds = await asyncio.to_thread(embedder.encode, batch_chunks)
-                if hasattr(batch_embeds, "tolist"):
-                    batch_embeds = batch_embeds.tolist()
-            except Exception as embed_err:
-                raise Exception(f"Embedding Generation Failure: Failed to generate vectors for batch {i}-{i+len(batch_chunks)}. Details: {str(embed_err)}")
+            # 1. Embedding generation for batch (with retries)
+            max_attempts = 3
+            backoff_delay = 2.0
+            batch_embeds = None
+            
+            for attempt in range(max_attempts):
+                try:
+                    logger.info(f"Generating embeddings for batch {i//batch_size + 1}/{(total_chunks + batch_size - 1)//batch_size} (chunks {i} to {i+len(batch_chunks)}) - Attempt {attempt + 1}/{max_attempts}...")
+                    if asyncio.iscoroutinefunction(embedder.encode):
+                        batch_embeds = await embedder.encode(batch_chunks)
+                    else:
+                        batch_embeds = await asyncio.to_thread(embedder.encode, batch_chunks)
+                    if hasattr(batch_embeds, "tolist"):
+                        batch_embeds = batch_embeds.tolist()
+                    break
+                except Exception as embed_err:
+                    logger.warning(f"Failed embedding generation at batch {i} (attempt {attempt + 1}/{max_attempts}): {embed_err}")
+                    if attempt == max_attempts - 1:
+                        raise Exception(f"Embedding Generation Failure: Failed to generate vectors for batch {i}-{i+len(batch_chunks)} after {max_attempts} attempts. Details: {str(embed_err)}")
+                    await asyncio.sleep(backoff_delay * (2 ** attempt))
 
             # 2. Verify embeddings shape is valid
             if not isinstance(batch_embeds, list) or len(batch_embeds) != len(batch_chunks):
@@ -482,15 +525,20 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             dim = len(batch_embeds[0])
             logger.info(f"✓ Verification: Embedding shape for batch is valid: [{len(batch_embeds)}, {dim}]")
 
-            # 3. Vector store insertion for batch
-            logger.info(f"Inserting batch of {len(batch_chunks)} vectors into vector store ({index_type})...")
-            try:
-                prev_count = await store.count()
-                await store.add_documents(batch_chunks, batch_embeds, batch_metadatas, batch_ids)
-                col_count = await store.count()
-                logger.info(f"✓ Verification: Batch insert complete. Collection count grew from {prev_count} to {col_count} (expected +{len(batch_chunks)})")
-            except Exception as db_err:
-                raise Exception(f"Vector Database Insertion Failure: Failed to store batch vectors in ChromaDB/FAISS. Details: {str(db_err)}")
+            # 3. Vector store insertion for batch (with retries)
+            for attempt in range(max_attempts):
+                try:
+                    logger.info(f"Inserting batch {i//batch_size + 1}/{(total_chunks + batch_size - 1)//batch_size} into vector store ({index_type}) - Attempt {attempt + 1}/{max_attempts}...")
+                    prev_count = await store.count()
+                    await store.add_documents(batch_chunks, batch_embeds, batch_metadatas, batch_ids)
+                    col_count = await store.count()
+                    logger.info(f"✓ Verification: Batch insert complete. Collection count grew from {prev_count} to {col_count} (expected +{len(batch_chunks)})")
+                    break
+                except Exception as db_err:
+                    logger.warning(f"Failed vector store insertion at batch {i} (attempt {attempt + 1}/{max_attempts}): {db_err}")
+                    if attempt == max_attempts - 1:
+                        raise Exception(f"Vector Database Insertion Failure: Failed to store batch vectors in ChromaDB/FAISS after {max_attempts} attempts. Details: {str(db_err)}")
+                    await asyncio.sleep(backoff_delay * (2 ** attempt))
 
             # Update progress
             progress = 50.0 + (min(i + batch_size, total_chunks) / total_chunks) * 40.0
@@ -502,6 +550,10 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             await asyncio.sleep(0.02)
 
             # Force garbage collection to free memory during large batch indexing
+            del batch_chunks
+            del batch_embeds
+            del batch_ids
+            del batch_metadatas
             import gc
             gc.collect()
             try:
@@ -583,6 +635,14 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         logger.info(f"Database Update: RAG index '{index_id}' status successfully changed to 'failed'.")
         raise
     finally:
+        # Close the ChromaDB client to flush the SQLite database and release locks
+        try:
+            from services.chroma_service import ChromaManager
+            ChromaManager.close_client()
+            logger.info("ChromaDB client cleanly closed in build_index_for_dataset finally block.")
+        except Exception as close_err:
+            logger.warning(f"Failed to close ChromaDB client in finally block: {close_err}")
+
         if temp_path and is_temp and os.path.exists(temp_path):
             try:
                 os.remove(temp_path)

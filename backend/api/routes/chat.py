@@ -7,8 +7,6 @@ import asyncio
 import httpx
 import logging
 import os
-import pandas as pd
-import PyPDF2
 from ollama import AsyncClient
 
 from models import (

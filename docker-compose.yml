@@ -23,6 +23,7 @@ services:
     ports:
       - "8000:8000"
     environment:
+      - PORT=8000
       - MONGODB_URL=mongodb://mongo:27017
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0

@@ -140,6 +140,7 @@ class AuthMiddleware:
         path = request.url.path
         public_paths = [
             "/",
+            "/health",
             "/api/health",
             "/favicon.ico",
             "/robots.txt",

@@ -27,6 +27,6 @@ COPY . .
 # Create dirs
 RUN mkdir -p uploads chroma_db models_store
 
-EXPOSE 8000
+EXPOSE 10000
 
-CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --timeout-keep-alive 120
+CMD ["python", "main.py"]
