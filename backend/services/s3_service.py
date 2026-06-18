@@ -62,14 +62,30 @@ async def download_file_from_s3(s3_key: str, suffix: str = ".txt") -> str:
         raise Exception("AWS S3 storage is not configured or failed to initialize.")
         
     bucket = settings.AWS_S3_BUCKET
+    if not bucket:
+        raise Exception("AWS_S3_BUCKET is not configured in settings.")
+    if not s3_key:
+        raise Exception("s3_key parameter is empty.")
+        
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     temp_path = temp_file.name
     temp_file.close()
     
     def _download():
         logger.info(f"Downloading key '{s3_key}' from S3 bucket '{bucket}' to '{temp_path}'...")
-        client.download_file(bucket, s3_key, temp_path)
-        return temp_path
+        try:
+            # Verify object exists in S3 before download
+            client.head_object(Bucket=bucket, Key=s3_key)
+            client.download_file(bucket, s3_key, temp_path)
+            return temp_path
+        except Exception as e:
+            logger.error(f"S3 download failed for key '{s3_key}' in bucket '{bucket}': {e}", exc_info=True)
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+            raise e
         
     return await asyncio.to_thread(_download)
 

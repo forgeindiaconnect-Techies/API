@@ -119,6 +119,7 @@ async def create_indexes():
     try:
         await db.datasets.create_index([("user_id", ASCENDING)])
         await db.datasets.create_index([("created_at", DESCENDING)])
+        await db.datasets.create_index([("dataset_id", ASCENDING)])
     except Exception as e:
         logger.error(f"Failed to create datasets indexes: {e}")
 

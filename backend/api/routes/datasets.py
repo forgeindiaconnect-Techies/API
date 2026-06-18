@@ -516,70 +516,132 @@ async def get_dataset_status(
     current_user=Depends(get_current_user)
 ):
     logger.info(f"Checking dataset status: {dataset_id}")
+    
+    mongodb_connected = False
+    chromadb_connected = False
+    
+    # 1. Verify MongoDB Connection with a strict 2-second timeout
+    db = get_db()
+    if db is not None:
+        try:
+            await asyncio.wait_for(db.command("ping"), timeout=2.0)
+            mongodb_connected = True
+        except Exception as db_err:
+            logger.warning(f"MongoDB connection check failed: {db_err}")
+            
+    # 2. Verify ChromaDB Connection with a strict 2-second timeout
     try:
-        # 1. Verify MongoDB Connection
-        db = get_db()
-        if db is None:
-            raise Exception("MongoDB connection unavailable")
-        await db.command("ping")
-
-        # 2. Verify Dataset record exists and current user has access
-        d = await fetch_user_dataset_or_raise(dataset_id, current_user)
-
-        # 3. Verify ChromaDB Connection
         from services.chroma_service import ChromaManager
-        chroma_client = await asyncio.to_thread(ChromaManager.get_client)
-        if chroma_client is None:
-            raise Exception("ChromaDB client is unavailable")
-        await asyncio.to_thread(chroma_client.heartbeat)
+        async def check_chroma():
+            chroma_client = await asyncio.to_thread(ChromaManager.get_client)
+            if chroma_client is not None:
+                await asyncio.to_thread(chroma_client.heartbeat)
+                return True
+            return False
+        chromadb_connected = await asyncio.wait_for(check_chroma(), timeout=2.0)
+    except Exception as chroma_err:
+        logger.warning(f"ChromaDB connection check failed: {chroma_err}")
+        chromadb_connected = False
 
-        # 4. Verify Background task status and dataset status field values
-        index_doc = await db.rag_indexes.find_one({"dataset_id": dataset_id})
-
-        status = d.get("status", "pending")
-        progress = 0
-        error_message = d.get("error_message")
-
-        if index_doc:
-            index_status = index_doc.get("status")
-            index_progress = index_doc.get("progress", 0.0)
-            index_error = index_doc.get("error")
-
-            if status == "processing":
-                progress = index_progress if index_progress is not None else 50
-                if index_status == "failed":
-                    status = "failed"
-                    error_message = index_error or "Background indexing task failed."
-            elif status in ("completed", "ready", "indexed") or index_status == "ready":
-                progress = 100
-            elif status in ("failed", "error") or index_status == "failed":
-                progress = 0
-                status = "failed"
-                error_message = error_message or index_error or "Indexing task failed."
-        else:
-            if status in ("completed", "ready", "indexed"):
-                progress = 100
-            elif status == "processing":
-                progress = 50
-            elif status in ("failed", "error"):
-                progress = 0
-            else:
-                progress = 10
-
+    # If MongoDB is down, we cannot fetch dataset document. We return a clean JSON response instead of 500.
+    if not mongodb_connected:
         return {
-            "status": status,
-            "progress": progress,
-            "error_message": error_message,
-            "mongodb_connected": True,
-            "chromadb_connected": True
+            "status": "error",
+            "progress": 0,
+            "error_message": "MongoDB connection unavailable",
+            "mongodb_connected": False,
+            "chromadb_connected": chromadb_connected
         }
 
+    try:
+        # Fetch dataset record
+        d = await fetch_user_dataset_or_raise(dataset_id, current_user)
+    except HTTPException as he:
+        # Let standard HTTPExceptions (like 404 Not Found) pass through
+        raise he
     except Exception as e:
-        logger.exception("Dataset status failed")
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
+        logger.error(f"Error fetching dataset for status endpoint: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "progress": 0,
+            "error_message": f"Failed to fetch dataset record: {str(e)}",
+            "mongodb_connected": mongodb_connected,
+            "chromadb_connected": chromadb_connected
+        }
+
+    # Query the indexing job document
+    index_doc = None
+    try:
+        async def fetch_index():
+            return await db.rag_indexes.find_one({"dataset_id": dataset_id})
+        index_doc = await asyncio.wait_for(fetch_index(), timeout=2.0)
+    except Exception as index_err:
+        logger.warning(f"Failed to fetch rag index document: {index_err}")
+
+    status = d.get("status", "pending")
+    progress = 0
+    error_message = d.get("error_message")
+    error_source = d.get("error_source") or "UNKNOWN"
+
+    if index_doc:
+        index_status = index_doc.get("status")
+        index_progress = index_doc.get("progress", 0.0)
+        index_error = index_doc.get("error")
+
+        if status == "processing":
+            progress = index_progress if index_progress is not None else 50
+            if index_status == "failed":
+                status = "failed"
+                error_message = index_error or "Background indexing task failed."
+                error_source = index_doc.get("error_source") or error_source
+        elif status in ("completed", "ready", "indexed") or index_status == "ready":
+            progress = 100
+        elif status in ("failed", "error") or index_status == "failed":
+            progress = 0
+            status = "failed"
+            error_message = error_message or index_error or "Indexing task failed."
+            error_source = index_doc.get("error_source") or error_source
+    else:
+        if status in ("completed", "ready", "indexed"):
+            progress = 100
+        elif status == "processing":
+            progress = 50
+        elif status in ("failed", "error"):
+            progress = 0
+            status = "failed"
+        else:
+            progress = 10
+
+    # If the status is failed, return the structured JSON format as specified
+    if status == "failed":
+        if error_source not in ("LOCAL", "CLOUDINARY", "AWS_S3", "GRIDFS", "UNKNOWN"):
+            err_msg_lower = (error_message or "").lower()
+            if "cloudinary" in err_msg_lower:
+                error_source = "CLOUDINARY"
+            elif "s3" in err_msg_lower:
+                error_source = "AWS_S3"
+            elif "gridfs" in err_msg_lower:
+                error_source = "GRIDFS"
+            elif "local" in err_msg_lower:
+                error_source = "LOCAL"
+            else:
+                error_source = "UNKNOWN"
+
+        return {
+            "status": "failed",
+            "dataset_id": dataset_id,
+            "error_source": error_source,
+            "error": error_message or "Unknown indexing error",
+            "recovery_attempts": ["local", "cloudinary", "s3", "gridfs"]
+        }
+
+    return {
+        "status": status,
+        "progress": progress,
+        "error_message": error_message,
+        "mongodb_connected": mongodb_connected,
+        "chromadb_connected": chromadb_connected
+    }
 
 
 @router.get("/{dataset_id}/eda")

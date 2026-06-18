@@ -158,6 +158,105 @@ async def upload_file_to_gridfs(file_bytes: bytes, filename: str, content_type: 
         logger.error(f"Failed to upload file to GridFS: {e}", exc_info=True)
         return ""
 
+async def check_cloudinary_availability(url: str) -> bool:
+    if not url:
+        return False
+    try:
+        async with httpx.AsyncClient() as client:
+            # First attempt a HEAD request
+            response = await client.head(url, timeout=5.0)
+            if response.status_code == 200:
+                return True
+            # If 405 Method Not Allowed or similar, try GET with range or simple GET
+            if response.status_code in (405, 404):
+                if response.status_code == 404:
+                    return False
+            # Fallback to GET check
+            response = await client.get(url, timeout=5.0)
+            return response.status_code == 200
+    except Exception as e:
+        logger.warning(f"Cloudinary availability check failed: {e}")
+        return False
+
+async def check_s3_availability(s3_key: str) -> bool:
+    if not s3_key:
+        return False
+    try:
+        from services.s3_service import get_s3_client
+        client = get_s3_client()
+        if client is None:
+            return False
+        bucket = settings.AWS_S3_BUCKET
+        if not bucket:
+            return False
+        # Run client.head_object in thread
+        def _check():
+            client.head_object(Bucket=bucket, Key=s3_key)
+            return True
+        return await asyncio.to_thread(_check)
+    except Exception as e:
+        logger.warning(f"AWS S3 availability check failed for key '{s3_key}': {e}")
+        return False
+
+async def check_gridfs_availability(dataset_doc: dict) -> bool:
+    gridfs_id = dataset_doc.get("gridfs_file_id") or dataset_doc.get("gridfs_id")
+    if not gridfs_id:
+        return False
+        
+    from bson import ObjectId
+    try:
+        if isinstance(gridfs_id, str):
+            if not ObjectId.is_valid(gridfs_id):
+                return False
+            oid = ObjectId(gridfs_id)
+        elif isinstance(gridfs_id, ObjectId):
+            oid = gridfs_id
+        else:
+            return False
+    except Exception:
+        return False
+        
+    db = get_db()
+    if db is None or (hasattr(db, "_db") and db._db.__class__.__name__ == "MockDB"):
+        return False
+        
+    try:
+        raw_db = db._db
+        collections = await raw_db.list_collection_names()
+        if "fs.files" not in collections:
+            logger.warning("GridFS: 'fs.files' collection does not exist in target database.")
+            return False
+            
+        file_doc = await raw_db["fs.files"].find_one({"_id": oid})
+        return file_doc is not None
+    except Exception as e:
+        logger.warning(f"GridFS availability check failed: {e}")
+        return False
+
+async def download_file_from_cloudinary(url: str) -> str:
+    """Download a file from Cloudinary URL to a temporary file path."""
+    async with httpx.AsyncClient() as client:
+        try:
+            head_resp = await client.head(url, timeout=5.0)
+            if head_resp.status_code == 404:
+                raise Exception("Resource not found (404)")
+        except Exception as head_err:
+            logger.warning(f"Cloudinary HEAD pre-validation check failed or timed out: {head_err}")
+
+        suffix = "." + url.split(".")[-1].split("?")[0].lower()
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        temp_path = temp_file.name
+        temp_file.close()
+
+        response = await client.get(url, timeout=60.0)
+        if response.status_code != 200:
+            raise Exception(f"Failed to download file from Cloudinary: {response.status_code}")
+        with open(temp_path, "wb") as f:
+            f.write(response.content)
+            
+    logger.info(f"Downloaded Cloudinary URL {url} to temp path {temp_path}")
+    return temp_path
+
 async def download_file_from_gridfs(dataset_doc: dict) -> str:
     """Download a file from MongoDB GridFS to a local temporary file path and return the path."""
     from motor.motor_asyncio import AsyncIOMotorGridFSBucket
@@ -167,12 +266,34 @@ async def download_file_from_gridfs(dataset_doc: dict) -> str:
     if db is None or (hasattr(db, "_db") and db._db.__class__.__name__ == "MockDB"):
         raise Exception("GridFS download failed: Database is MockDB or unavailable")
         
-    gridfs_id = dataset_doc.get("gridfs_id")
+    gridfs_id = dataset_doc.get("gridfs_file_id") or dataset_doc.get("gridfs_id")
     if not gridfs_id:
         raise Exception("No gridfs_id found in dataset document")
         
+    # Validate gridfs_id format
+    try:
+        if isinstance(gridfs_id, str):
+            if not ObjectId.is_valid(gridfs_id):
+                raise Exception(f"Invalid GridFS ID format: '{gridfs_id}' is not a valid 24-character hex string")
+            oid = ObjectId(gridfs_id)
+        else:
+            oid = gridfs_id
+    except Exception as err:
+        raise Exception(f"GridFS ID validation failed: {err}")
+        
     try:
         raw_db = db._db
+        
+        # Verify fs.files collection exists
+        collections = await raw_db.list_collection_names()
+        if "fs.files" not in collections:
+            raise Exception("GridFS download failed: 'fs.files' collection does not exist in the database")
+            
+        # Check if file exists in fs.files
+        file_doc = await raw_db["fs.files"].find_one({"_id": oid})
+        if not file_doc:
+            raise Exception(f"GridFS file not found: file with ID {oid} does not exist in fs.files collection")
+            
         fs = AsyncIOMotorGridFSBucket(raw_db)
         
         # Determine suffix
@@ -185,7 +306,7 @@ async def download_file_from_gridfs(dataset_doc: dict) -> str:
         
         # Open in write-binary mode
         with open(temp_path, "wb") as f:
-            await fs.download_to_stream(ObjectId(gridfs_id), f)
+            await fs.download_to_stream(oid, f)
             
         logger.info(f"Successfully downloaded GridFS ID {gridfs_id} to temp path {temp_path}")
         return temp_path
@@ -197,22 +318,18 @@ async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
     """Get the file path for the dataset using sequential recovery checks:
     1. Local filesystem check
     2. Cloudinary download recovery
-    3. GridFS download recovery
+    3. AWS S3 download recovery
+    4. GridFS download recovery
     Returns (path, is_temp). Fails only after all options are exhausted."""
-    local_path = dataset_doc.get("file_path")
+    local_path = dataset_doc.get("local_path") or dataset_doc.get("file_path")
     cloudinary_url = dataset_doc.get("cloudinary_url") or dataset_doc.get("secure_url")
-    gridfs_id = dataset_doc.get("gridfs_id")
-    dataset_id = str(dataset_doc.get("_id"))
-    file_name = dataset_doc.get("file_name") or dataset_doc.get("name", "unknown")
-    
-    local_detail = f"path '{local_path}' is missing or not a file"
-    cloudinary_detail = "missing"
     s3_key = dataset_doc.get("s3_key")
-    s3_detail = "missing"
-    gridfs_detail = "missing"
+    gridfs_id = dataset_doc.get("gridfs_file_id") or dataset_doc.get("gridfs_id")
+    dataset_id = str(dataset_doc.get("_id"))
+    file_name = dataset_doc.get("filename") or dataset_doc.get("file_name") or dataset_doc.get("name", "unknown")
+    file_type = dataset_doc.get("file_type") or file_name.split(".")[-1].lower()
     
     # 1. Local filesystem check
-    logger.info(f"File Recovery: [1/3] Checking local filesystem for dataset '{file_name}' (ID: {dataset_id})...")
     local_exists = False
     resolved_local_path = None
     if local_path:
@@ -224,65 +341,138 @@ async def get_dataset_file(dataset_doc: dict) -> tuple[str, bool]:
         ]
         for p in paths_to_try:
             if os.path.exists(p) and os.path.isfile(p):
-                logger.info(f"✓ File Recovery: Found local file at: {p}")
                 local_exists = True
                 resolved_local_path = p
                 break
                 
-    if local_exists and resolved_local_path:
-        return resolved_local_path, False
-
-    logger.warning(f"File Recovery: Local copy is missing ({local_detail}). Moving to Cloudinary recovery...")
+    local_status = "FOUND" if local_exists else "MISSING"
     
-    # 2. Cloudinary download recovery
+    # 2. Cloudinary availability validation via HEAD request before download
+    cloudinary_exists = False
     if cloudinary_url:
+        cloudinary_exists = await check_cloudinary_availability(cloudinary_url)
+    cloudinary_status = "FOUND" if cloudinary_exists else "MISSING"
+    
+    # 3. AWS S3 check
+    s3_exists = False
+    if s3_key:
+        s3_exists = await check_s3_availability(s3_key)
+    s3_status = "FOUND" if s3_exists else "MISSING"
+    
+    # 4. GridFS collection check and file validation
+    gridfs_exists = False
+    if gridfs_id:
+        gridfs_exists = await check_gridfs_availability(dataset_doc)
+    gridfs_status = "FOUND" if gridfs_exists else "MISSING"
+    
+    # Select Source
+    selected_source = "None"
+    if local_status == "FOUND":
+        selected_source = "Local File"
+    elif cloudinary_status == "FOUND":
+        selected_source = "Cloudinary"
+    elif s3_status == "FOUND":
+        selected_source = "AWS S3"
+    elif gridfs_status == "FOUND":
+        selected_source = "GridFS"
+        
+    # Formulate detailed recovery logs output block exactly as requested
+    report = (
+        f"[DATASET RECOVERY]\n"
+        f"Dataset ID: {dataset_id}\n\n"
+        f"Local File: {local_status}\n"
+        f"Cloudinary: {cloudinary_status}\n"
+        f"AWS S3: {s3_status}\n"
+        f"GridFS: {gridfs_status}\n\n"
+        f"Selected Source: {selected_source}"
+    )
+    print(report)
+    logger.info(report)
+    
+    # Try downloading/retrieving based on selected source
+    if selected_source == "Local File" and resolved_local_path:
+        return resolved_local_path, False
+        
+    elif selected_source == "Cloudinary":
         try:
-            logger.info(f"File Recovery: [2/3] Downloading dataset from Cloudinary URL: {cloudinary_url}")
+            logger.info(f"File Recovery: Downloading dataset from Cloudinary URL: {cloudinary_url}")
             temp_path = await download_file_from_cloudinary(cloudinary_url)
-            logger.info(f"✓ File Recovery: Successfully recovered dataset from Cloudinary at: {temp_path}")
+            
+            # Recreate local directory path automatically and cache recovered file back to local path
+            if local_path:
+                try:
+                    dir_name = os.path.dirname(os.path.abspath(local_path))
+                    if dir_name:
+                        os.makedirs(dir_name, exist_ok=True)
+                    import shutil
+                    shutil.copy2(temp_path, local_path)
+                    logger.info(f"Cached recovered Cloudinary file to local path: {local_path}")
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    return local_path, False
+                except Exception as cache_err:
+                     logger.warning(f"Failed to cache Cloudinary file to local path {local_path}: {cache_err}")
             return temp_path, True
         except Exception as cloud_err:
-            cloudinary_detail = f"failed: {str(cloud_err)}"
             logger.error(f"File Recovery: Cloudinary download failed for dataset '{file_name}': {cloud_err}", exc_info=True)
-            logger.info("File Recovery: Cloudinary download failed. Moving to GridFS recovery...")
-    else:
-        logger.warning(f"File Recovery: [2/3] Cloudinary URL is missing for dataset '{file_name}' (ID: {dataset_id}). Moving to GridFS recovery...")
-        
-    # 3. AWS S3 download recovery
-    if s3_key:
+            raise Exception(f"Cloudinary download failed: {cloud_err}")
+            
+    elif selected_source == "AWS S3":
         try:
-            logger.info(f"File Recovery: [3/4] Downloading dataset from AWS S3 key: {s3_key}")
+            logger.info(f"File Recovery: Downloading dataset from AWS S3 key: {s3_key}")
             from services.s3_service import download_file_from_s3
             temp_path = await download_file_from_s3(s3_key, suffix="." + file_type)
-            logger.info(f"✓ File Recovery: Successfully recovered dataset from AWS S3 at: {temp_path}")
+            
+            # Recreate local directory path automatically and cache recovered file back to local path
+            if local_path:
+                try:
+                    dir_name = os.path.dirname(os.path.abspath(local_path))
+                    if dir_name:
+                        os.makedirs(dir_name, exist_ok=True)
+                    import shutil
+                    shutil.copy2(temp_path, local_path)
+                    logger.info(f"Cached recovered AWS S3 file to local path: {local_path}")
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    return local_path, False
+                except Exception as cache_err:
+                     logger.warning(f"Failed to cache AWS S3 file to local path {local_path}: {cache_err}")
             return temp_path, True
         except Exception as s3_err:
-            s3_detail = f"failed: {str(s3_err)}"
             logger.error(f"File Recovery: AWS S3 download failed for dataset '{file_name}': {s3_err}", exc_info=True)
-            logger.info("File Recovery: AWS S3 download failed. Moving to GridFS recovery...")
-    else:
-        logger.warning(f"File Recovery: [3/4] AWS S3 key is missing for dataset '{file_name}' (ID: {dataset_id}). Moving to GridFS recovery...")
-
-    # 4. GridFS download recovery
-    if gridfs_id:
+            raise Exception(f"AWS S3 download failed: {s3_err}")
+            
+    elif selected_source == "GridFS":
         try:
-            logger.info(f"File Recovery: [4/4] Downloading dataset from GridFS (ID: {gridfs_id})...")
+            logger.info(f"File Recovery: Downloading dataset from GridFS (ID: {gridfs_id})...")
             temp_path = await download_file_from_gridfs(dataset_doc)
-            logger.info(f"✓ File Recovery: Successfully recovered dataset from GridFS at: {temp_path}")
+            
+            # Recreate local directory path automatically and cache recovered file back to local path
+            if local_path:
+                try:
+                    dir_name = os.path.dirname(os.path.abspath(local_path))
+                    if dir_name:
+                        os.makedirs(dir_name, exist_ok=True)
+                    import shutil
+                    shutil.copy2(temp_path, local_path)
+                    logger.info(f"Cached recovered GridFS file to local path: {local_path}")
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    return local_path, False
+                except Exception as cache_err:
+                     logger.warning(f"Failed to cache GridFS file to local path {local_path}: {cache_err}")
             return temp_path, True
         except Exception as grid_err:
-            gridfs_detail = f"failed: {str(grid_err)}"
             logger.error(f"File Recovery: GridFS download failed for dataset '{file_name}' (ID: {dataset_id}): {grid_err}", exc_info=True)
-    else:
-        logger.warning(f"File Recovery: [4/4] GridFS backup ID is missing for dataset '{file_name}' (ID: {dataset_id}).")
-
+            raise Exception(f"GridFS download failed: {grid_err}")
+            
     # Neither local file, Cloudinary, AWS S3, nor GridFS works. Raise detailed error message.
     raise Exception(
         f"File Recovery Failure: All recovery methods (local, Cloudinary, AWS S3, GridFS) have failed. "
-        f"The local file is missing ({local_detail}). "
-        f"Cloudinary retrieval was {cloudinary_detail}. "
-        f"AWS S3 retrieval was {s3_detail}. "
-        f"GridFS retrieval was {gridfs_detail} for dataset '{file_name}' (ID: {dataset_id})."
+        f"Local File was {local_status}. "
+        f"Cloudinary retrieval was {cloudinary_status}. "
+        f"AWS S3 retrieval was {s3_status}. "
+        f"GridFS retrieval was {gridfs_status} for dataset '{file_name}' (ID: {dataset_id})."
     )
 
 
@@ -323,7 +513,7 @@ def validate_environment_variables():
 async def build_index_for_dataset(dataset_doc: dict, db) -> str:
     """Download, extract, chunk, embed, and store dataset in ChromaDB or FAISS."""
     dataset_id = str(dataset_doc["_id"])
-    file_name = dataset_doc.get("file_name") or dataset_doc.get("name", "unknown")
+    file_name = dataset_doc.get("filename") or dataset_doc.get("file_name") or dataset_doc.get("name", "unknown")
     file_type = dataset_doc.get("file_type") or file_name.split(".")[-1].lower()
     
     # Check if dataset still exists in MongoDB before starting
@@ -620,17 +810,39 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         logger.error(f"Indexing failed for dataset {dataset_id}:\n{full_stack}")
         
         error_msg = str(e)
-        logger.info(f"Database Update: Changing status of dataset '{dataset_id}' to 'failed' and saving error message: {error_msg}...")
+        
+        # Determine error source
+        error_source = "UNKNOWN"
+        err_msg_lower = error_msg.lower()
+        if "cloudinary" in err_msg_lower:
+            error_source = "CLOUDINARY"
+        elif "s3" in err_msg_lower:
+            error_source = "AWS_S3"
+        elif "gridfs" in err_msg_lower:
+            error_source = "GRIDFS"
+        elif "local" in err_msg_lower:
+            error_source = "LOCAL"
+            
+        logger.info(f"Database Update: Changing status of dataset '{dataset_id}' to 'failed', error_source '{error_source}' and saving error message: {error_msg}...")
         await db.datasets.update_one(
             {"_id": dataset_doc["_id"]},
-            {"$set": {"status": "failed", "error_message": error_msg}}
+            {"$set": {
+                "status": "failed", 
+                "error_message": error_msg,
+                "error_source": error_source
+            }}
         )
         logger.info(f"Database Update: Status successfully changed to 'failed' for dataset '{dataset_id}'.")
         
         logger.info(f"Database Update: Changing status of RAG index '{index_id}' to 'failed'...")
         await db.rag_indexes.update_one(
             {"_id": index_id},
-            {"$set": {"status": "failed", "progress": 0.0, "error": error_msg}}
+            {"$set": {
+                "status": "failed", 
+                "progress": 0.0, 
+                "error": error_msg,
+                "error_source": error_source
+            }}
         )
         logger.info(f"Database Update: RAG index '{index_id}' status successfully changed to 'failed'.")
         raise
