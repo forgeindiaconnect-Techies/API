@@ -7,6 +7,9 @@ from services.chroma_service import collection_is_empty
 
 logger = logging.getLogger(__name__)
 
+# In-process cache to prevent infinite RAG index rebuild loops
+_rebuilt_datasets = set()
+
 def dispatch_rebuild_task(dataset_id: str):
     """Always rebuild index locally since ChromaDB SQLite persistence is local to the web container."""
     logger.info(f"Startup recovery: Spawning local background task to rebuild index for dataset: {dataset_id}")
@@ -173,6 +176,11 @@ async def run_startup_recovery():
             if dataset_id in rebuild_queue:
                 continue
             
+            # Prevent infinite rebuild loops
+            if dataset_id in _rebuilt_datasets:
+                logger.info(f"Startup recovery: Dataset {dataset_id} already processed/rebuilt in this run. Skipping to prevent loop.")
+                continue
+            
             # Skip legacy datasets that do not have a Cloudinary or GridFS backup
             if not dataset.get("cloudinary_url") and not dataset.get("secure_url") and not dataset.get("gridfs_id"):
                 logger.warning(
@@ -186,6 +194,7 @@ async def run_startup_recovery():
             if not index_doc:
                 logger.info(f"No RAG index document found for dataset {dataset_id}. Queueing index rebuild...")
                 rebuild_queue.append(dataset_id)
+                _rebuilt_datasets.add(dataset_id)
                 continue
                 
             index_id = str(index_doc["_id"])
@@ -202,6 +211,7 @@ async def run_startup_recovery():
                     {"$set": {"status": "building", "error": None}}
                 )
                 rebuild_queue.append(dataset_id)
+                _rebuilt_datasets.add(dataset_id)
             else:
                 logger.info(f"Startup recovery: Dataset '{dataset.get('name') or dataset.get('file_name')}' index {index_id} is verified healthy.")
             

@@ -190,22 +190,18 @@ async def initialize_app_bg():
         startup_status["aws_s3"] = True
         safe_print("✅ AWS S3 Connected (Not Configured / Local Fallback)")
 
-    # 3. Check ChromaDB with timeout
+    # 3. Check ChromaDB with timeout (60 seconds)
     try:
         from services.chroma_service import ChromaManager
         def _check_chroma():
-            client = ChromaManager.get_client()
-            if client is not None:
-                client.heartbeat()
-                return True
-            return False
-        chroma_ok = await asyncio.wait_for(asyncio.to_thread(_check_chroma), timeout=5.0)
+            res = ChromaManager.validate_startup()
+            return res.get("status") == "success"
+        chroma_ok = await asyncio.wait_for(asyncio.to_thread(_check_chroma), timeout=60.0)
         if chroma_ok:
             startup_status["chromadb"] = True
             safe_print("✅ ChromaDB Connected")
             logger.info("✅ ChromaDB Connected")
         else:
-            logger.error("ChromaDB get_client returned None.")
             startup_status["chromadb"] = False
             safe_print("❌ ChromaDB Connection Failed")
     except Exception as e:
@@ -221,16 +217,20 @@ async def initialize_app_bg():
         logger.info("🚀 Application Ready")
         return
 
-    # 4. RAG index startup recovery check
-    logger.info("Starting RAG startup recovery checks...")
-    recovery_start = time.time()
-    try:
-        from services.startup_rebuild import run_startup_recovery
-        await run_startup_recovery()
-        recovery_time = time.time() - recovery_start
-        logger.info(f"RAG startup recovery checks completed in {recovery_time:.2f}s (Memory: {get_rss_memory_mb():.2f} MB)")
-    except Exception as recovery_err:
-        logger.error(f"Startup recovery failed: {recovery_err}")
+    # 4. RAG index startup recovery check (run in background)
+    async def run_recovery_bg():
+        logger.info("Starting RAG startup recovery checks...")
+        recovery_start = time.time()
+        try:
+            from services.startup_rebuild import run_startup_recovery
+            await run_startup_recovery()
+            recovery_time = time.time() - recovery_start
+            logger.info(f"RAG startup recovery checks completed in {recovery_time:.2f}s (Memory: {get_rss_memory_mb():.2f} MB)")
+        except Exception as recovery_err:
+            logger.error(f"Startup recovery failed: {recovery_err}")
+            
+    asyncio.create_task(run_recovery_bg())
+    safe_print("✅ RAG Recovery Started in Background")
         
     total_time = time.time() - start_time
     final_mem = get_rss_memory_mb()

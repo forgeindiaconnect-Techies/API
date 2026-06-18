@@ -9,6 +9,26 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def safe_print(msg: str):
+    import sys
+    try:
+        print(msg, flush=True)
+    except UnicodeEncodeError:
+        try:
+            if hasattr(sys.stdout, "reconfigure"):
+                sys.stdout.reconfigure(encoding='utf-8')
+                print(msg, flush=True)
+            else:
+                raise
+        except Exception:
+            ascii_msg = msg.replace("🧠", "[CHROMA]").replace("📁", "Dir:").replace("📦", "Collections:").replace("💾", "Disk:").replace("⏱", "Time:").replace("✅", "[OK]").replace("❌", "[FAIL]")
+            try:
+                print(ascii_msg, flush=True)
+            except Exception:
+                pass
+
+
 class ChromaManager:
     _client = None
 
@@ -34,6 +54,121 @@ class ChromaManager:
                 logger.error(f"Error closing ChromaDB client: {e}")
             finally:
                 cls._client = None
+
+    @classmethod
+    def validate_startup(cls) -> dict:
+        import time
+        import os
+        import shutil
+        import sqlite3
+        import chromadb
+        from chromadb.config import Settings
+        
+        diagnostics = {
+            "path": settings.CHROMA_PERSIST_DIR,
+            "collections_count": 0,
+            "disk_space": "Unknown",
+            "startup_time_ms": 0.0,
+            "status": "failed",
+            "error_message": "",
+            "chroma_version": chromadb.__version__,
+            "sqlite_version": sqlite3.sqlite_version
+        }
+        
+        start_time = time.perf_counter()
+        
+        # 1. Verify directory exists & test write permissions
+        try:
+            os.makedirs(settings.CHROMA_PERSIST_DIR, exist_ok=True)
+            test_file_path = os.path.join(settings.CHROMA_PERSIST_DIR, ".write_test")
+            with open(test_file_path, "w", encoding="utf-8") as f:
+                f.write("test")
+            if os.path.exists(test_file_path):
+                os.remove(test_file_path)
+        except Exception as e:
+            diagnostics["error_message"] = f"Directory permissions failure: {str(e)}"
+            diagnostics["startup_time_ms"] = round((time.perf_counter() - start_time) * 1000, 2)
+            cls._print_diagnostics_report(diagnostics)
+            return diagnostics
+
+        # 2. Disk space check
+        try:
+            total, used, free = shutil.disk_usage(settings.CHROMA_PERSIST_DIR)
+            free_gb = round(free / (1024**3), 2)
+            diagnostics["disk_space"] = f"{free_gb} GB"
+        except Exception as e:
+            logger.warning(f"Could not retrieve disk space: {e}")
+
+        # 3. Client Initialization & CRUD validation
+        try:
+            if cls._client is None or getattr(cls._client, "_closed", False):
+                cls._client = chromadb.PersistentClient(
+                    path=settings.CHROMA_PERSIST_DIR,
+                    settings=Settings(anonymized_telemetry=False)
+                )
+            
+            # List collections
+            collections = cls._client.list_collections()
+            diagnostics["collections_count"] = len(collections)
+            
+            # Connection validation (test create/insert/query/delete)
+            test_col_name = "startup_validation_check_test_col"
+            try:
+                try:
+                    cls._client.delete_collection(test_col_name)
+                except Exception:
+                    pass
+                test_col = cls._client.create_collection(
+                    name=test_col_name,
+                    embedding_function=DummyEmbeddingFunction()
+                )
+                test_col.add(
+                    documents=["startup diagnostics test"],
+                    ids=["diagnostics_id"],
+                    embeddings=[[0.0] * 384]
+                )
+                query_res = test_col.query(
+                    query_embeddings=[[0.0] * 384],
+                    n_results=1
+                )
+                if not query_res or len(query_res.get("ids", [])) == 0:
+                    raise Exception("Query validation returned empty results")
+                cls._client.delete_collection(test_col_name)
+            except Exception as val_err:
+                raise Exception(f"Validation collection test failed: {str(val_err)}")
+
+            diagnostics["status"] = "success"
+        except Exception as e:
+            diagnostics["error_message"] = str(e)
+
+        diagnostics["startup_time_ms"] = round((time.perf_counter() - start_time) * 1000, 2)
+        cls._print_diagnostics_report(diagnostics)
+        return diagnostics
+
+    @classmethod
+    def _print_diagnostics_report(cls, diagnostics: dict):
+        report = [
+            "==================================================",
+            "🧠 ChromaDB Startup Check",
+            "=========================",
+            "",
+            f"📁 Path: {diagnostics['path']}",
+            f"🏷 ChromaDB Version: {diagnostics['chroma_version']}",
+            f"🛢 SQLite Version: {diagnostics['sqlite_version']}",
+            f"📦 Collections Found: {diagnostics['collections_count']}",
+            f"💾 Disk Space Available: {diagnostics['disk_space']}",
+            f"⏱ Startup Time: {diagnostics['startup_time_ms']} ms",
+            ""
+        ]
+        if diagnostics["status"] == "success":
+            report.append("✅ ChromaDB Connected Successfully")
+        else:
+            report.append("❌ ChromaDB Connection Failed")
+            report.append(f"Error: {diagnostics['error_message']}")
+        report.append("=======================")
+        
+        safe_print("\n".join(report))
+
 
 async def run_with_retry_async(func, *args, **kwargs):
     """
@@ -84,12 +219,24 @@ async def collection_is_empty(collection_name: str) -> bool:
         def _check():
             try:
                 col = client.get_collection(name=collection_name, embedding_function=DummyEmbeddingFunction())
-                return col.count() == 0
+                count = col.count()
+                logger.info(f"ChromaDB Collection '{collection_name}' count: {count} documents.")
+                return count == 0
             except Exception as e:
                 err_msg = str(e).lower()
                 if "does not exist" in err_msg or "not found" in err_msg:
+                    logger.info(f"ChromaDB Collection '{collection_name}' does not exist.")
                     return True
-                raise
+                # If any other exception occurs, it might be corrupted or locked
+                logger.error(f"ChromaDB Collection '{collection_name}' check failed (possibly corrupted): {e}")
+                # Recreate recovery: delete collection so it gets recreated fresh
+                try:
+                    logger.warning(f"Attempting to delete possibly corrupted collection '{collection_name}' for automatic recovery...")
+                    client.delete_collection(name=collection_name)
+                    logger.info(f"Deleted collection '{collection_name}' successfully.")
+                except Exception as del_err:
+                    logger.error(f"Failed to delete corrupted collection '{collection_name}': {del_err}")
+                return True
                 
         return await run_with_retry_async(_check)
     except Exception as e:
