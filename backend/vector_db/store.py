@@ -444,18 +444,18 @@ def get_embedding_model(model_name: str = "paraphrase-MiniLM-L3-v2"):
     if model_name == "all-MiniLM-L6-v2":
         model_name = "paraphrase-MiniLM-L3-v2"
 
-    # 0.5 Try Google Gemini if API key is present
+    # 0.5 Try Google Gemini if explicitly requested
     gemini_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY")
-    if gemini_key and not gemini_key.startswith("your-"):
+    if gemini_key and not gemini_key.startswith("your-") and ("gemini" in model_name.lower() or "google" in model_name.lower()):
         try:
             logger.info("Initializing GeminiEmbedder...")
             return GeminiEmbedder(api_key=gemini_key)
         except Exception as e:
             logger.error(f"Failed to initialize GeminiEmbedder: {e}. Falling back to OpenAI/SentenceTransformer.")
 
-    # 1. Try OpenAI if API key is present
+    # 1. Try OpenAI if explicitly requested
     openai_key = settings.OPENAI_API_KEY or os.environ.get("OPENAI_API_KEY")
-    if openai_key and not openai_key.startswith("sk-..."):
+    if openai_key and not openai_key.startswith("sk-...") and ("openai" in model_name.lower() or "text-embedding" in model_name.lower()):
         try:
             logger.info("Initializing OpenAIEmbedder...")
             return OpenAIEmbedder(api_key=openai_key)
