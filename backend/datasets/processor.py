@@ -32,6 +32,8 @@ def _process_sync(file_path: str, file_type: str) -> Dict[str, Any]:
         return _process_image(file_path)
     elif file_type in ("mp3", "wav", "m4a"):
         return _process_audio(file_path)
+    elif file_type == "zip":
+        return _process_zip(file_path)
     
     raise ValueError(f"Unsupported file type: {file_type}")
 
@@ -285,6 +287,27 @@ def _process_audio(path: str) -> Dict[str, Any]:
         "columns": [],
         "metadata": {"type": "audio", "path": os.path.basename(path)}
     }
+
+
+def _process_zip(path: str) -> Dict[str, Any]:
+    import zipfile
+    try:
+        with zipfile.ZipFile(path, "r") as zip_ref:
+            info_list = zip_ref.infolist()
+            file_count = len(info_list)
+            names = zip_ref.namelist()
+        return {
+            "rows": file_count,
+            "cols": None,
+            "columns": [],
+            "metadata": {
+                "file_count": file_count,
+                "filenames": names[:50]
+            }
+        }
+    except Exception as e:
+        logger.error(f"ZIP metadata extraction failed: {e}")
+        return {"rows": None, "cols": None, "columns": [], "metadata": {"type": "zip", "error": str(e)}}
 
 
 async def run_eda(file_path: str, file_type: str) -> Dict[str, Any]:

@@ -34,10 +34,13 @@ def fmt_dataset(d: dict) -> dict:
         "cols": d.get("cols"),
         "status": "ready" if status in ("ready", "indexed") else status,
         "user_id": d.get("user_id", ""),
-        "created_at": d.get("created_at", datetime.utcnow()),
+        "created_at": d.get("created_at", d.get("created_at", datetime.utcnow())),
         "processed_at": d.get("processed_at"),
         "metadata": d.get("metadata"),
         "error_message": d.get("error_message"),
+        "chunk_count": d.get("chunk_count", 0),
+        "embedding_count": d.get("embedding_count", 0),
+        "processing_time": d.get("processing_time", 0.0),
     }
 
 
@@ -157,6 +160,15 @@ async def upload_dataset(
     if file_size > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
         raise HTTPException(status_code=413, detail="File too large")
 
+    # Calculate content hash and prevent duplicate upload
+    import hashlib
+    file_hash = hashlib.md5(file_bytes).hexdigest()
+    user_id_str = str(current_user["_id"])
+    duplicate = await db.datasets.find_one({"file_hash": file_hash, "user_id": user_id_str})
+    if duplicate:
+        logger.info(f"Duplicate upload detected: User {user_id_str} uploaded file '{file.filename}' which already exists as ID {duplicate['_id']}")
+        raise HTTPException(status_code=409, detail="This file has already been uploaded.")
+
     # 2. Write to local storage immediately to ensure background processing has a local file copy
     try:
         user_upload_dir = os.path.join(settings.UPLOAD_DIR, str(current_user["_id"]))
@@ -175,56 +187,33 @@ async def upload_dataset(
         logger.error(f"Failed to save and validate temp file locally: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to store file: {str(e)}")
 
-    # 4. Cloudinary upload (Sync/Await)
+    # 4. Cloudinary upload (Sync/Await) with retry
     cloudinary_res = None
     cloudinary_err_msg = None
     if settings.CLOUDINARY_CLOUD_NAME and settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET:
-        try:
-            logger.info(f"Uploading {file.filename} to Cloudinary...")
-            from services.cloudinary_service import upload_file_to_cloudinary
-            cloudinary_res = await upload_file_to_cloudinary(file_bytes, file.filename, resource_type="raw")
-            logger.info(f"Cloudinary upload succeeded. Complete response: {cloudinary_res}")
-        except Exception as upload_err:
-            cloudinary_err_msg = str(upload_err)
-            logger.error(f"Cloudinary upload failed: {upload_err}")
+        for attempt in range(3):
+            try:
+                logger.info(f"Uploading {file.filename} to Cloudinary (Attempt {attempt+1}/3)...")
+                from services.cloudinary_service import upload_file_to_cloudinary
+                cloudinary_res = await upload_file_to_cloudinary(file_bytes, file.filename, resource_type="raw")
+                logger.info(f"Cloudinary upload succeeded. Complete response: {cloudinary_res}")
+                break
+            except Exception as upload_err:
+                cloudinary_err_msg = str(upload_err)
+                logger.error(f"Cloudinary upload attempt {attempt+1} failed: {upload_err}")
+                if attempt < 2:
+                    await asyncio.sleep(1)
     else:
         cloudinary_err_msg = "Cloudinary credentials not configured"
         logger.warning("Cloudinary credentials not configured. Skipping Cloudinary upload.")
 
-    # 5. GridFS upload (Sync/Await)
+    # 5. GridFS upload (Sync/Await) with retry
     gridfs_id = None
     gridfs_err_msg = None
-    try:
-        logger.info(f"Backing up {file.filename} to GridFS...")
-        from services.dataset_service import upload_file_to_gridfs
-        content_type = "application/octet-stream"
-        if ext == "txt":
-            content_type = "text/plain"
-        elif ext == "csv":
-            content_type = "text/csv"
-        elif ext == "pdf":
-            content_type = "application/pdf"
-        elif ext == "json":
-            content_type = "application/json"
-        
-        gridfs_id = await upload_file_to_gridfs(file_bytes, file.filename, content_type)
-        if not gridfs_id:
-            gridfs_id = None
-            gridfs_err_msg = "GridFS upload returned empty ID"
-            logger.error("GridFS upload returned empty ID")
-        else:
-            logger.info(f"Successfully uploaded to GridFS with ID: {gridfs_id}")
-    except Exception as gridfs_err:
-        gridfs_err_msg = str(gridfs_err)
-        logger.error(f"GridFS backup failed: {gridfs_err}")
-
-    # 5.5 AWS S3 upload
-    s3_res = None
-    s3_err_msg = None
-    if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY and settings.AWS_S3_BUCKET:
+    for attempt in range(3):
         try:
-            logger.info(f"Backing up {file.filename} to AWS S3...")
-            from services.s3_service import upload_file_to_s3
+            logger.info(f"Backing up {file.filename} to GridFS (Attempt {attempt+1}/3)...")
+            from services.dataset_service import upload_file_to_gridfs
             content_type = "application/octet-stream"
             if ext == "txt":
                 content_type = "text/plain"
@@ -234,11 +223,45 @@ async def upload_dataset(
                 content_type = "application/pdf"
             elif ext == "json":
                 content_type = "application/json"
-            s3_res = await upload_file_to_s3(file_bytes, file.filename, content_type)
-            logger.info(f"AWS S3 upload succeeded. Key: {s3_res.get('s3_key')}")
-        except Exception as s3_err:
-            s3_err_msg = str(s3_err)
-            logger.error(f"AWS S3 backup failed: {s3_err}")
+            
+            gridfs_id = await upload_file_to_gridfs(file_bytes, file.filename, content_type)
+            if not gridfs_id:
+                gridfs_err_msg = "GridFS upload returned empty ID"
+                logger.error(f"GridFS upload returned empty ID (Attempt {attempt+1}/3)")
+            else:
+                logger.info(f"Successfully uploaded to GridFS with ID: {gridfs_id}")
+                break
+        except Exception as gridfs_err:
+            gridfs_err_msg = str(gridfs_err)
+            logger.error(f"GridFS backup attempt {attempt+1} failed: {gridfs_err}")
+            if attempt < 2:
+                await asyncio.sleep(1)
+
+    # 5.5 AWS S3 upload with retry
+    s3_res = None
+    s3_err_msg = None
+    if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY and settings.AWS_S3_BUCKET:
+        for attempt in range(3):
+            try:
+                logger.info(f"Backing up {file.filename} to AWS S3 (Attempt {attempt+1}/3)...")
+                from services.s3_service import upload_file_to_s3
+                content_type = "application/octet-stream"
+                if ext == "txt":
+                    content_type = "text/plain"
+                elif ext == "csv":
+                    content_type = "text/csv"
+                elif ext == "pdf":
+                    content_type = "application/pdf"
+                elif ext == "json":
+                    content_type = "application/json"
+                s3_res = await upload_file_to_s3(file_bytes, file.filename, content_type)
+                logger.info(f"AWS S3 upload succeeded. Key: {s3_res.get('s3_key')}")
+                break
+            except Exception as s3_err:
+                s3_err_msg = str(s3_err)
+                logger.error(f"AWS S3 backup attempt {attempt+1} failed: {s3_err}")
+                if attempt < 2:
+                    await asyncio.sleep(1)
     else:
         s3_err_msg = "AWS S3 credentials not configured"
         logger.warning("AWS S3 credentials not configured. Skipping S3 upload.")
@@ -272,6 +295,7 @@ async def upload_dataset(
         "name": file.filename,
         "file_type": ext,
         "size_bytes": file_size,
+        "file_hash": file_hash,
         "status": "processing",
         "user_id": str(current_user["_id"]),
         "created_at": datetime.utcnow(),
@@ -637,13 +661,19 @@ async def get_dataset_status(
             "dataset_id": dataset_id,
             "error_source": error_source,
             "error": error_message or "Unknown indexing error",
-            "recovery_attempts": ["local", "cloudinary", "s3", "gridfs"]
+            "recovery_attempts": ["local", "cloudinary", "s3", "gridfs"],
+            "chunk_count": d.get("chunk_count", 0),
+            "embedding_count": d.get("embedding_count", 0),
+            "processing_time": d.get("processing_time", 0.0),
         }
 
     return {
         "status": status,
         "progress": progress,
         "error_message": error_message,
+        "chunk_count": d.get("chunk_count", 0),
+        "embedding_count": d.get("embedding_count", 0),
+        "processing_time": d.get("processing_time", 0.0),
         "mongodb_connected": mongodb_connected,
         "chromadb_connected": chromadb_connected
     }

@@ -44,9 +44,10 @@ const formatSize = (bytes) => {
 
 export default function DatasetsPage() {
   const navigate = useNavigate()
-  const { datasets, setDatasets, addDataset, removeDataset } = useDatasetStore()
+  const { datasets, setDatasets, addDataset, removeDataset, updateDataset } = useDatasetStore()
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState(0)
   const [search, setSearch] = useState('')
   const [showUpload, setShowUpload] = useState(false)
 
@@ -66,20 +67,96 @@ export default function DatasetsPage() {
     fetchDatasets()
   }, [])
 
-  const onDrop = useCallback(async (acceptedFiles) => {
-    setUploading(true)
-    for (const file of acceptedFiles) {
-      const formData = new FormData()
-      formData.append('file', file)
+  // Poll status of processing/pending datasets to update UI reactively
+  useEffect(() => {
+    const processing = datasets.filter(d => d.status === 'processing' || d.status === 'pending')
+    if (processing.length === 0) return
+
+    const interval = setInterval(async () => {
+      for (const ds of processing) {
+        try {
+          const { data } = await datasetAPI.getStatus(ds.id)
+          if (data.status === 'indexed' || data.status === 'ready') {
+            const detailRes = await datasetAPI.get(ds.id)
+            updateDataset(ds.id, {
+              ...detailRes.data,
+              status: 'ready'
+            })
+            toast.success(`Dataset "${ds.name}" is processed and ready!`)
+          } else if (data.status === 'failed') {
+            updateDataset(ds.id, {
+              status: 'error',
+              error_message: data.error || 'Indexing task failed.'
+            })
+            toast.error(`Dataset "${ds.name}" processing failed: ${data.error || 'Indexing task failed.'}`)
+          }
+        } catch (err) {
+          console.error(`Error polling status for dataset ${ds.id}:`, err)
+        }
+      }
+    }, 3000)
+
+    return () => clearInterval(interval)
+  }, [datasets, updateDataset])
+
+  const uploadWithRetry = async (file, maxRetries = 3, delayMs = 1500) => {
+    let attempt = 0
+    while (attempt < maxRetries) {
       try {
-        const { data } = await datasetAPI.upload(formData)
-        addDataset(data)
-        toast.success(`${file.name} uploaded successfully!`)
+        const formData = new FormData()
+        formData.append('file', file)
+        const onProgress = (progressEvent) => {
+          const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total)
+          setUploadProgress(percentCompleted)
+        }
+        const { data } = await datasetAPI.upload(formData, onProgress)
+        return data
       } catch (err) {
-        toast.error(`Upload failed for ${file.name}: ${err.response?.data?.detail || err.message}`)
+        attempt++
+        if (attempt >= maxRetries) {
+          throw err
+        }
+        toast.error(`Upload failed for ${file.name}. Retrying attempt ${attempt}/${maxRetries} in ${delayMs / 1000}s...`)
+        await new Promise((resolve) => setTimeout(resolve, delayMs))
       }
     }
+  }
+
+  const onDrop = useCallback(async (acceptedFiles) => {
+    const allowedExtensions = ['csv', 'xlsx', 'xls', 'pdf', 'txt', 'docx', 'jpg', 'jpeg', 'png', 'webp', 'mp3', 'wav', 'm4a', 'zip']
+    const maxSizeBytes = 500 * 1024 * 1024 // 500MB
+
+    const validFiles = []
+    for (const file of acceptedFiles) {
+      const ext = file.name.split('.').pop().toLowerCase()
+      if (!allowedExtensions.includes(ext)) {
+        toast.error(`File type .${ext} is not supported.`)
+        continue
+      }
+      if (file.size > maxSizeBytes) {
+        toast.error(`File ${file.name} exceeds the 500MB limit.`)
+        continue
+      }
+      validFiles.push(file)
+    }
+
+    if (validFiles.length === 0) return
+
+    setUploading(true)
+    setUploadProgress(0)
+
+    for (const file of validFiles) {
+      try {
+        const data = await uploadWithRetry(file)
+        addDataset(data)
+        toast.success(`${file.name} uploaded successfully and started processing!`)
+      } catch (err) {
+        toast.error(`Upload failed for ${file.name} after 3 attempts: ${err.response?.data?.detail || err.message}`)
+      }
+    }
+
     setUploading(false)
+    setUploadProgress(0)
     setShowUpload(false)
   }, [addDataset])
 
@@ -91,9 +168,16 @@ export default function DatasetsPage() {
       'application/vnd.ms-excel': ['.xls'],
       'application/pdf': ['.pdf'],
       'text/plain': ['.txt'],
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
       'application/zip': ['.zip'],
-      'image/*': ['.jpg', '.jpeg', '.png', '.webp'],
-      'audio/*': ['.mp3', '.wav', '.m4a'],
+      'application/x-zip-compressed': ['.zip'],
+      'image/jpeg': ['.jpeg', '.jpg'],
+      'image/png': ['.png'],
+      'image/webp': ['.webp'],
+      'audio/mpeg': ['.mp3'],
+      'audio/mp3': ['.mp3'],
+      'audio/wav': ['.wav'],
+      'audio/x-m4a': ['.m4a'],
     },
   })
 
@@ -169,9 +253,20 @@ export default function DatasetsPage() {
               >
                 <input {...getInputProps()} />
                 {uploading ? (
-                  <div className="space-y-2">
+                  <div className="space-y-4">
                     <Loader size={32} className="mx-auto animate-spin" style={{ color: 'var(--accent-primary)' }} />
                     <p className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>Uploading to server...</p>
+                    
+                    {/* Progress Bar */}
+                    <div className="w-full bg-slate-700/60 rounded-full h-2 mt-2 overflow-hidden max-w-xs mx-auto">
+                      <div
+                        className="bg-violet-600 h-2 rounded-full transition-all duration-300 ease-out"
+                        style={{ width: `${uploadProgress}%` }}
+                      />
+                    </div>
+                    <p className="text-xs font-medium text-slate-400">
+                      {uploadProgress}% completed
+                    </p>
                   </div>
                 ) : (
                   <>

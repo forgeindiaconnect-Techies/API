@@ -275,6 +275,7 @@ class VectorStore:
                         logger.error(f"Failed to delete ChromaDB collection '{self.collection_name}': {ce}")
                         raise
             await run_with_retry_async(op)
+            self._collection = None
         elif self.backend == "faiss":
             try:
                 if hasattr(self, "_index_path") and os.path.exists(self._index_path):
@@ -285,6 +286,9 @@ class VectorStore:
                     logger.info(f"Deleted FAISS docs file: {self._docs_path}")
             except Exception as e:
                 logger.error(f"Failed to delete FAISS store files for '{self.collection_name}': {e}")
+            self._index = None
+            self._docs = []
+        self._initialized = False
 
     async def count(self) -> int:
         await self.ensure_initialized()
