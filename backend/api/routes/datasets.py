@@ -212,7 +212,7 @@ async def upload_dataset(
                 pass
         raise HTTPException(status_code=409, detail="This file has already been uploaded.")
 
-    # 3. Create a dataset record in MongoDB
+    # 3. Create a dataset record in MongoDB (initially with only local_path)
     doc = {
         "cloudinary_url": None,
         "secure_url": None,
@@ -250,7 +250,107 @@ async def upload_dataset(
                 pass
         raise HTTPException(status_code=500, detail="Database insertion failed")
 
-    # 4. Add background task for RAG indexing (which will also perform backup uploads first)
+    # 4. Immediately upload file to cloud storage BEFORE returning response.
+    #    This guarantees the file survives a server restart between upload and indexing.
+    #    All three backends run in parallel to minimize upload latency.
+    backup_update = {}
+    
+    # Only attempt backup if file fits within our safe in-memory limit
+    backup_max_mb = int(os.environ.get("BACKUP_MAX_SIZE_MB", "200"))
+    file_size_mb = file_size / (1024 * 1024)
+    
+    if file_size_mb <= backup_max_mb:
+        try:
+            # Read the freshly saved local file once for all upload tasks
+            with open(local_path, "rb") as fh:
+                file_bytes = fh.read()
+
+            content_type_map = {
+                "txt": "text/plain", "csv": "text/csv", "pdf": "application/pdf",
+                "json": "application/json", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "zip": "application/zip", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "png": "image/png", "webp": "image/webp", "mp3": "audio/mpeg", "wav": "audio/wav",
+            }
+            content_type = content_type_map.get(ext, "application/octet-stream")
+
+            # --- GridFS upload ---
+            async def _upload_gridfs():
+                try:
+                    from services.dataset_service import upload_file_to_gridfs
+                    gfs_id = await upload_file_to_gridfs(file_bytes, file.filename, content_type)
+                    if gfs_id:
+                        logger.info(f"Upload: GridFS backup succeeded for dataset {doc['_id']}: gridfs_id={gfs_id}")
+                        return {"gridfs_id": gfs_id}
+                except Exception as e:
+                    logger.error(f"Upload: GridFS backup failed for dataset {doc['_id']}: {e}")
+                return {}
+
+            # --- Cloudinary upload ---
+            async def _upload_cloudinary():
+                if not (settings.CLOUDINARY_CLOUD_NAME and settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET):
+                    logger.warning(f"Upload: Cloudinary not configured, skipping.")
+                    return {}
+                try:
+                    from services.cloudinary_service import upload_file_to_cloudinary
+                    res = await upload_file_to_cloudinary(file_bytes, file.filename)
+                    sec_url = res.get("secure_url") or res.get("url")
+                    pub_id = res.get("public_id")
+                    if sec_url:
+                        logger.info(f"Upload: Cloudinary backup succeeded for dataset {doc['_id']}: {sec_url}")
+                        return {"cloudinary_url": sec_url, "secure_url": sec_url, "public_id": pub_id}
+                except Exception as e:
+                    logger.error(f"Upload: Cloudinary backup failed for dataset {doc['_id']}: {e}")
+                return {}
+
+            # --- S3 upload ---
+            async def _upload_s3():
+                if not (settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY and settings.AWS_S3_BUCKET):
+                    logger.warning(f"Upload: AWS S3 not configured, skipping.")
+                    return {}
+                try:
+                    from services.s3_service import upload_file_to_s3
+                    res = await upload_file_to_s3(file_bytes, file.filename, content_type)
+                    if res.get("s3_key"):
+                        logger.info(f"Upload: AWS S3 backup succeeded for dataset {doc['_id']}: key={res['s3_key']}")
+                        return {"s3_key": res["s3_key"], "s3_url": res.get("s3_url")}
+                except Exception as e:
+                    logger.error(f"Upload: AWS S3 backup failed for dataset {doc['_id']}: {e}")
+                return {}
+
+            logger.info(f"Upload: Starting parallel cloud backups for dataset {doc['_id']} ({file_size_mb:.1f}MB)...")
+            results = await asyncio.gather(_upload_gridfs(), _upload_cloudinary(), _upload_s3())
+
+            for r in results:
+                backup_update.update(r)
+
+            # Set secure_url from S3 if Cloudinary didn't provide one
+            if not backup_update.get("secure_url") and backup_update.get("s3_url"):
+                backup_update["secure_url"] = backup_update["s3_url"]
+
+            if backup_update:
+                await db.datasets.update_one(
+                    {"_id": result.inserted_id},
+                    {"$set": backup_update}
+                )
+                doc.update(backup_update)
+                logger.info(f"Upload: Cloud backup fields saved to MongoDB for dataset {doc['_id']}: {list(backup_update.keys())}")
+            else:
+                logger.warning(
+                    f"Upload: ALL cloud backup attempts failed for dataset {doc['_id']}. "
+                    f"File is on local disk only ({local_path}). "
+                    f"IMPORTANT: If the server restarts before indexing completes, this file will be PERMANENTLY LOST. "
+                    f"Ensure Cloudinary/S3/GridFS credentials are correctly configured in Render environment."
+                )
+        except Exception as backup_err:
+            logger.error(f"Upload: Cloud backup process raised an unexpected error for dataset {doc['_id']}: {backup_err}", exc_info=True)
+    else:
+        logger.warning(
+            f"Upload: File {file.filename} ({file_size_mb:.1f}MB) exceeds BACKUP_MAX_SIZE_MB={backup_max_mb}MB. "
+            f"Skipping in-memory cloud backup. File stored on local disk only."
+        )
+
+    # 5. Add background task for RAG indexing (now safe: cloud backup already done above)
     from services.dataset_service import build_index_for_dataset
     background_tasks.add_task(build_index_for_dataset, doc, db)
 

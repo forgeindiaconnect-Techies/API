@@ -556,141 +556,73 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
     )
     logger.info(f"Database Update: Status successfully changed to 'processing' for dataset '{dataset_id}'.")
 
-    # 1.5 Parallel Backup Strategy (Cloudinary, GridFS, AWS S3) executed in background
-    if exists and not exists.get("secure_url") and not exists.get("gridfs_id") and not exists.get("s3_key"):
-        logger.info(f"Background Backup: Starting parallel uploads for dataset {dataset_id}...")
+
+    # 1.5 Cloud Backup Safety Net
+    # NOTE: Cloud backup is now performed synchronously during the /upload endpoint,
+    # so fresh uploads will already have gridfs_id/secure_url/s3_key set.
+    # This block is a last-resort fallback for old datasets that were uploaded before
+    # the upload-time backup was implemented, or in case the upload-time backup failed.
+    fresh_exists = await db.datasets.find_one({"_id": dataset_doc["_id"]})
+    has_cloud_backup = bool(
+        (fresh_exists or {}).get("secure_url") or
+        (fresh_exists or {}).get("gridfs_id") or
+        (fresh_exists or {}).get("s3_key") or
+        (fresh_exists or {}).get("cloudinary_url")
+    )
+    if has_cloud_backup:
+        logger.info(f"Background Backup: Dataset {dataset_id} already has cloud backup. Skipping re-upload.")
+        # Update in-memory doc with latest backup fields from DB for file recovery
+        if fresh_exists:
+            dataset_doc.update({k: fresh_exists[k] for k in ("secure_url", "gridfs_id", "s3_key", "cloudinary_url", "public_id", "s3_url") if fresh_exists.get(k)})
+    else:
+        # Fallback: attempt cloud backup now (dataset has no cloud backup yet)
         local_path = exists.get("file_path") or dataset_doc.get("file_path")
         if local_path and os.path.exists(local_path):
-            try:
-                # Guard: skip reading into RAM if file exceeds the safe memory limit.
-                # On Render free tier (512MB), loading a large file + running the embedding model = OOM crash.
-                backup_max_mb = int(os.environ.get("BACKUP_MAX_SIZE_MB", "200"))
-                file_size_bytes = os.path.getsize(local_path)
-                file_size_mb = file_size_bytes / (1024 * 1024)
-                if file_size_mb > backup_max_mb:
-                    logger.warning(
-                        f"Background Backup: Skipping in-memory backup upload for dataset {dataset_id} — "
-                        f"file size {file_size_mb:.1f}MB exceeds BACKUP_MAX_SIZE_MB={backup_max_mb}MB. "
-                        f"Indexing will proceed using local file only."
-                    )
-                else:
+            backup_max_mb = int(os.environ.get("BACKUP_MAX_SIZE_MB", "200"))
+            file_size_mb = os.path.getsize(local_path) / (1024 * 1024)
+            if file_size_mb <= backup_max_mb:
+                logger.info(f"Background Backup: No cloud backup found for {dataset_id}. Running fallback upload ({file_size_mb:.1f}MB)...")
+                try:
                     with open(local_path, "rb") as f:
                         file_bytes = f.read()
-
-                    # Cloudinary task
-                    async def upload_cloudinary_task():
-                        if not (settings.CLOUDINARY_CLOUD_NAME and settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET):
-                            return None, "Cloudinary credentials not configured"
-                        err_msg = None
-                        for attempt in range(2):
-                            try:
-                                logger.info(f"Background upload: uploading {file_name} to Cloudinary (Attempt {attempt+1}/2)...")
-                                from services.cloudinary_service import upload_file_to_cloudinary
-                                res = await upload_file_to_cloudinary(file_bytes, file_name, resource_type="raw")
-                                logger.info("Background Cloudinary upload succeeded.")
-                                return res, None
-                            except Exception as e:
-                                err_msg = str(e)
-                                logger.error(f"Background Cloudinary upload attempt {attempt+1} failed: {e}")
-                                if "403" in err_msg or "credentials" in err_msg.lower() or "unauthorized" in err_msg.lower():
-                                    break
-                                if attempt < 1:
-                                    await asyncio.sleep(0.5)
-                        return None, err_msg
-
-                    # GridFS task
-                    async def upload_gridfs_task():
-                        err_msg = None
-                        for attempt in range(2):
-                            try:
-                                logger.info(f"Background backup: uploading {file_name} to GridFS (Attempt {attempt+1}/2)...")
-                                content_type = "application/octet-stream"
-                                if file_type == "txt":
-                                    content_type = "text/plain"
-                                elif file_type == "csv":
-                                    content_type = "text/csv"
-                                elif file_type == "pdf":
-                                    content_type = "application/pdf"
-                                elif file_type == "json":
-                                    content_type = "application/json"
-                                res = await upload_file_to_gridfs(file_bytes, file_name, content_type)
-                                if res:
-                                    logger.info("Background GridFS backup succeeded.")
-                                    return res, None
-                                err_msg = "GridFS upload returned empty ID"
-                            except Exception as e:
-                                err_msg = str(e)
-                                logger.error(f"Background GridFS upload attempt {attempt+1} failed: {e}")
-                                if attempt < 1:
-                                    await asyncio.sleep(0.5)
-                        return None, err_msg
-
-                    # S3 task
-                    async def upload_s3_task():
-                        if not (settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY and settings.AWS_S3_BUCKET):
-                            return None, "AWS S3 credentials not configured"
-                        err_msg = None
-                        for attempt in range(2):
-                            try:
-                                logger.info(f"Background backup: uploading {file_name} to AWS S3 (Attempt {attempt+1}/2)...")
-                                from services.s3_service import upload_file_to_s3
-                                content_type = "application/octet-stream"
-                                if file_type == "txt":
-                                    content_type = "text/plain"
-                                elif file_type == "csv":
-                                    content_type = "text/csv"
-                                elif file_type == "pdf":
-                                    content_type = "application/pdf"
-                                elif file_type == "json":
-                                    content_type = "application/json"
-                                res = await upload_file_to_s3(file_bytes, file_name, content_type)
-                                logger.info("Background AWS S3 backup succeeded.")
-                                return res, None
-                            except Exception as e:
-                                err_msg = str(e)
-                                logger.error(f"Background AWS S3 backup attempt {attempt+1} failed: {e}")
-                                if "403" in err_msg or "credentials" in err_msg.lower() or "forbidden" in err_msg.lower():
-                                    break
-                                if attempt < 1:
-                                    await asyncio.sleep(0.5)
-                        return None, err_msg
-
-                    # Run backups in parallel
-                    logger.info("Starting background parallel backup uploads to Cloudinary, GridFS, and S3...")
-                    results = await asyncio.gather(
-                        upload_cloudinary_task(),
-                        upload_gridfs_task(),
-                        upload_s3_task()
-                    )
-                    (cloudinary_res, cloudinary_err_msg), (gridfs_id, gridfs_err_msg), (s3_res, s3_err_msg) = results
-
-                    # Build update dict
+                    content_type_map = {
+                        "txt": "text/plain", "csv": "text/csv", "pdf": "application/pdf",
+                        "json": "application/json", "zip": "application/zip",
+                    }
+                    ct = content_type_map.get(file_type, "application/octet-stream")
                     up_dict = {}
-                    sec_url = None
-                    public_id = None
-                    if cloudinary_res:
-                        sec_url = cloudinary_res.get("secure_url") or cloudinary_res.get("url")
-                        public_id = cloudinary_res.get("public_id")
-                        up_dict["cloudinary_url"] = sec_url
-                        up_dict["secure_url"] = sec_url
-                        up_dict["public_id"] = public_id
-                    if gridfs_id:
-                        up_dict["gridfs_id"] = gridfs_id
-                    if s3_res:
-                        up_dict["s3_key"] = s3_res.get("s3_key")
-                        up_dict["s3_url"] = s3_res.get("s3_url")
-                        if not up_dict.get("secure_url"):
-                            up_dict["secure_url"] = s3_res.get("s3_url")
-
+                    try:
+                        gridfs_result = await upload_file_to_gridfs(file_bytes, file_name, ct)
+                        if gridfs_result:
+                            up_dict["gridfs_id"] = gridfs_result
+                    except Exception as e:
+                        logger.error(f"Background Backup (fallback) GridFS failed: {e}")
+                    if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY and settings.AWS_S3_BUCKET:
+                        try:
+                            from services.s3_service import upload_file_to_s3
+                            s3_res = await upload_file_to_s3(file_bytes, file_name, ct)
+                            if s3_res.get("s3_key"):
+                                up_dict["s3_key"] = s3_res["s3_key"]
+                                up_dict["s3_url"] = s3_res.get("s3_url")
+                                up_dict["secure_url"] = s3_res.get("s3_url")
+                        except Exception as e:
+                            logger.error(f"Background Backup (fallback) S3 failed: {e}")
                     if up_dict:
                         await db.datasets.update_one({"_id": dataset_doc["_id"]}, {"$set": up_dict})
                         dataset_doc.update(up_dict)
-                        logger.info(f"Background Backup: Document {dataset_id} updated with backup info: {up_dict}")
+                        logger.info(f"Background Backup (fallback): saved {list(up_dict.keys())} for dataset {dataset_id}")
                     else:
-                        logger.warning("Background Backup: None of the backups succeeded. Indexing will continue using local file.")
-            except Exception as backup_err:
-                logger.error(f"Background Backup: Unexpected failure: {backup_err}", exc_info=True)
-    
+                        logger.warning(f"Background Backup (fallback): ALL methods failed for {dataset_id}. File is local-only.")
+                except Exception as backup_err:
+                    logger.error(f"Background Backup (fallback): unexpected error: {backup_err}", exc_info=True)
+            else:
+                logger.warning(f"Background Backup: File {file_size_mb:.1f}MB exceeds BACKUP_MAX_SIZE_MB={backup_max_mb}. Skipping fallback backup.")
+        else:
+            logger.warning(f"Background Backup: No cloud backup and no local file for dataset {dataset_id}. File is unrecoverable.")
+
+
+
+
     # Check if there is an index document in rag_indexes
     index_doc = await db.rag_indexes.find_one({"dataset_id": dataset_id})
     if index_doc:
