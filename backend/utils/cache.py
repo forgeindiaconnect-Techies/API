@@ -17,16 +17,46 @@ class DateTimeEncoder(json.JSONEncoder):
             return obj.isoformat()
         return super().default(obj)
 
+# Redis Circuit Breaker State
+_redis_healthy = True
+_redis_disabled_until = 0
+
+def is_redis_available() -> bool:
+    global _redis_healthy, _redis_disabled_until
+    if not _redis_healthy and time.time() < _redis_disabled_until:
+        return False
+    return True
+
+def report_redis_failure(operation: str, key: str, err: Exception):
+    global _redis_healthy, _redis_disabled_until
+    if _redis_healthy:
+        _redis_healthy = False
+        logger.warning(
+            f"Redis connection failed during {operation} (key: {key}). "
+            f"Temporarily disabling Redis cache for 60 seconds to prevent log spam and latency. Error: {err}"
+        )
+    else:
+        logger.debug(f"Redis connection still down during {operation} (key: {key}). Error: {err}")
+    _redis_disabled_until = time.time() + 60
+
+def report_redis_success():
+    global _redis_healthy
+    if not _redis_healthy:
+        _redis_healthy = True
+        logger.info("Redis connection recovered. Re-enabling Redis cache.")
+
 async def cache_get(key: str) -> Optional[Any]:
-    # Try Redis first
-    redis = get_redis()
-    if redis:
-        try:
-            val = await redis.get(key)
-            if val is not None:
-                return json.loads(val)
-        except Exception as e:
-            logger.error(f"Redis cache_get failed for key {key}: {e}")
+    # Try Redis first if available
+    if is_redis_available():
+        redis = get_redis()
+        if redis:
+            try:
+                val = await redis.get(key)
+                report_redis_success()
+                if val is not None:
+                    return json.loads(val)
+            except Exception as e:
+                report_redis_failure("cache_get", key, e)
     
     # Fallback to in-memory
     if key in _in_memory_cache:
@@ -42,16 +72,18 @@ async def cache_get(key: str) -> Optional[Any]:
     return None
 
 async def cache_set(key: str, value: Any, ttl: int = 300) -> bool:
-    # Set to Redis
-    redis = get_redis()
+    # Set to Redis if available
     redis_ok = False
-    if redis:
-        try:
-            serialized = json.dumps(value, cls=DateTimeEncoder)
-            await redis.setex(key, ttl, serialized)
-            redis_ok = True
-        except Exception as e:
-            logger.error(f"Redis cache_set failed for key {key}: {e}")
+    if is_redis_available():
+        redis = get_redis()
+        if redis:
+            try:
+                serialized = json.dumps(value, cls=DateTimeEncoder)
+                await redis.setex(key, ttl, serialized)
+                report_redis_success()
+                redis_ok = True
+            except Exception as e:
+                report_redis_failure("cache_set", key, e)
             
     # Always update in-memory cache as fallback/mirrored copy
     expiry = time.time() + ttl
@@ -59,13 +91,15 @@ async def cache_set(key: str, value: Any, ttl: int = 300) -> bool:
     return redis_ok
 
 async def cache_delete(key: str):
-    # Delete from Redis
-    redis = get_redis()
-    if redis:
-        try:
-            await redis.delete(key)
-        except Exception as e:
-            logger.error(f"Redis cache_delete failed for key {key}: {e}")
+    # Delete from Redis if available
+    if is_redis_available():
+        redis = get_redis()
+        if redis:
+            try:
+                await redis.delete(key)
+                report_redis_success()
+            except Exception as e:
+                report_redis_failure("cache_delete", key, e)
             
     # Delete from in-memory
     if key in _in_memory_cache:
@@ -76,16 +110,18 @@ async def cache_delete(key: str):
 
 async def cache_clear_user(user_id: str):
     """Clear all cached keys for a specific user."""
-    redis = get_redis()
-    if redis:
-        try:
-            # Clear standard keys matching patterns
-            patterns = [f"*:user:{user_id}*", f"*:{user_id}:*"]
-            for pat in patterns:
-                async for key in redis.scan_iter(match=pat):
-                    await redis.delete(key)
-        except Exception as e:
-            logger.error(f"Redis cache scan/clear failed for user {user_id}: {e}")
+    if is_redis_available():
+        redis = get_redis()
+        if redis:
+            try:
+                # Clear standard keys matching patterns
+                patterns = [f"*:user:{user_id}*", f"*:{user_id}:*"]
+                for pat in patterns:
+                    async for key in redis.scan_iter(match=pat):
+                        await redis.delete(key)
+                report_redis_success()
+            except Exception as e:
+                report_redis_failure("cache_clear_user", f"user:{user_id}", e)
             
     # Clear from in-memory
     global _in_memory_cache

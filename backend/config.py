@@ -70,7 +70,7 @@ class Settings(BaseSettings):
 
     # Storage
     UPLOAD_DIR: str = "./uploads"
-    MAX_UPLOAD_SIZE_MB: int = 500
+    MAX_UPLOAD_SIZE_MB: int = 1000
 
     # Cloudinary
     CLOUDINARY_CLOUD_NAME: str = ""

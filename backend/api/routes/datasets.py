@@ -149,169 +149,77 @@ async def upload_dataset(
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"File type .{ext} not supported")
 
-    # 1. Read file bytes and verify size quickly
-    try:
-        file_bytes = await file.read()
-        file_size = len(file_bytes)
-    except Exception as e:
-        logger.error(f"Failed to read upload file: {e}")
-        raise HTTPException(status_code=400, detail="Failed to read uploaded file")
-
-    if file_size > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="File too large")
-
-    # Calculate content hash and prevent duplicate upload
+    # 1. Stream write to local storage immediately in chunks to avoid loading all bytes in memory
     import hashlib
-    file_hash = hashlib.md5(file_bytes).hexdigest()
+    import uuid
+    
+    unique_id = str(uuid.uuid4())
+    user_upload_dir = os.path.join(settings.UPLOAD_DIR, str(current_user["_id"]))
+    os.makedirs(user_upload_dir, exist_ok=True)
+    local_path = os.path.join(user_upload_dir, f"{unique_id}.{ext}")
+    
+    md5_hash = hashlib.md5()
+    file_size = 0
+    chunk_size = 1024 * 1024  # 1MB chunk size
+    
+    try:
+        logger.info(f"Starting streaming upload of file {file.filename} to local path {local_path}...")
+        with open(local_path, "wb") as f:
+            while True:
+                chunk = await file.read(chunk_size)
+                if not chunk:
+                    break
+                file_size += len(chunk)
+                if file_size > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+                    f.close()
+                    if os.path.exists(local_path):
+                        os.remove(local_path)
+                    logger.warning(f"File upload size {file_size} bytes exceeds limit {settings.MAX_UPLOAD_SIZE_MB}MB.")
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File exceeds maximum upload size of {settings.MAX_UPLOAD_SIZE_MB}MB."
+                    )
+                f.write(chunk)
+                md5_hash.update(chunk)
+                
+        # Validate file existence on disk and size match
+        if not os.path.exists(local_path) or not os.path.isfile(local_path) or os.path.getsize(local_path) != file_size:
+            raise Exception("File stream write validation failed: File on disk is missing or size is inconsistent.")
+            
+        logger.info(f"Successfully streamed upload locally: {local_path} ({file_size} bytes)")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to stream and validate file locally: {e}", exc_info=True)
+        if os.path.exists(local_path):
+            try:
+                os.remove(local_path)
+            except Exception:
+                pass
+        raise HTTPException(status_code=500, detail=f"Failed to store file on server: {str(e)}")
+
+    file_hash = md5_hash.hexdigest()
     user_id_str = str(current_user["_id"])
+    
+    # 2. Check for duplicate upload
     duplicate = await db.datasets.find_one({"file_hash": file_hash, "user_id": user_id_str})
     if duplicate:
         logger.info(f"Duplicate upload detected: User {user_id_str} uploaded file '{file.filename}' which already exists as ID {duplicate['_id']}")
+        if os.path.exists(local_path):
+            try:
+                os.remove(local_path)
+            except Exception:
+                pass
         raise HTTPException(status_code=409, detail="This file has already been uploaded.")
 
-    # 2. Write to local storage immediately to ensure background processing has a local file copy
-    try:
-        user_upload_dir = os.path.join(settings.UPLOAD_DIR, str(current_user["_id"]))
-        os.makedirs(user_upload_dir, exist_ok=True)
-        unique_id = str(uuid.uuid4())
-        local_path = os.path.join(user_upload_dir, f"{unique_id}.{ext}")
-        with open(local_path, "wb") as f:
-            f.write(file_bytes)
-        
-        # 3. Validate file existence on disk before creating dataset record
-        if not os.path.exists(local_path) or not os.path.isfile(local_path) or os.path.getsize(local_path) == 0:
-            raise Exception("Local storage validation failed: File was not created successfully.")
-            
-        logger.info(f"Saved and validated raw upload locally at: {local_path}")
-    except Exception as e:
-        logger.error(f"Failed to save and validate temp file locally: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to store file: {str(e)}")
-
-    # 4. Parallel Upload Strategy (Cloudinary, GridFS, AWS S3) to prevent API Timeouts
-    async def upload_cloudinary_task():
-        if not (settings.CLOUDINARY_CLOUD_NAME and settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET):
-            return None, "Cloudinary credentials not configured"
-        err_msg = None
-        for attempt in range(2):
-            try:
-                logger.info(f"Uploading {file.filename} to Cloudinary (Attempt {attempt+1}/2)...")
-                from services.cloudinary_service import upload_file_to_cloudinary
-                res = await upload_file_to_cloudinary(file_bytes, file.filename, resource_type="raw")
-                logger.info("Cloudinary upload succeeded.")
-                return res, None
-            except Exception as e:
-                err_msg = str(e)
-                logger.error(f"Cloudinary upload attempt {attempt+1} failed: {e}")
-                # Don't retry if permanent auth error
-                if "403" in err_msg or "credentials" in err_msg.lower() or "unauthorized" in err_msg.lower():
-                    break
-                if attempt < 1:
-                    await asyncio.sleep(0.5)
-        return None, err_msg
-
-    async def upload_gridfs_task():
-        err_msg = None
-        for attempt in range(2):
-            try:
-                logger.info(f"Backing up {file.filename} to GridFS (Attempt {attempt+1}/2)...")
-                from services.dataset_service import upload_file_to_gridfs
-                content_type = "application/octet-stream"
-                if ext == "txt":
-                    content_type = "text/plain"
-                elif ext == "csv":
-                    content_type = "text/csv"
-                elif ext == "pdf":
-                    content_type = "application/pdf"
-                elif ext == "json":
-                    content_type = "application/json"
-                res = await upload_file_to_gridfs(file_bytes, file.filename, content_type)
-                if res:
-                    logger.info("GridFS backup succeeded.")
-                    return res, None
-                err_msg = "GridFS upload returned empty ID"
-            except Exception as e:
-                err_msg = str(e)
-                logger.error(f"GridFS upload attempt {attempt+1} failed: {e}")
-                if attempt < 1:
-                    await asyncio.sleep(0.5)
-        return None, err_msg
-
-    async def upload_s3_task():
-        if not (settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY and settings.AWS_S3_BUCKET):
-            return None, "AWS S3 credentials not configured"
-        err_msg = None
-        for attempt in range(2):
-            try:
-                logger.info(f"Backing up {file.filename} to AWS S3 (Attempt {attempt+1}/2)...")
-                from services.s3_service import upload_file_to_s3
-                content_type = "application/octet-stream"
-                if ext == "txt":
-                    content_type = "text/plain"
-                elif ext == "csv":
-                    content_type = "text/csv"
-                elif ext == "pdf":
-                    content_type = "application/pdf"
-                elif ext == "json":
-                    content_type = "application/json"
-                res = await upload_file_to_s3(file_bytes, file.filename, content_type)
-                logger.info("AWS S3 backup succeeded.")
-                return res, None
-            except Exception as e:
-                err_msg = str(e)
-                logger.error(f"AWS S3 backup attempt {attempt+1} failed: {e}")
-                if "403" in err_msg or "credentials" in err_msg.lower() or "forbidden" in err_msg.lower():
-                    break
-                if attempt < 1:
-                    await asyncio.sleep(0.5)
-        return None, err_msg
-
-    async def upload_cloudinary_wrapper():
-        try:
-            return await asyncio.wait_for(upload_cloudinary_task(), timeout=8.0)
-        except Exception as e:
-            logger.warning(f"Cloudinary upload timed out or failed: {e}")
-            return None, f"Timed out: {str(e)}"
-
-    async def upload_s3_wrapper():
-        try:
-            return await asyncio.wait_for(upload_s3_task(), timeout=8.0)
-        except Exception as e:
-            logger.warning(f"AWS S3 upload timed out or failed: {e}")
-            return None, f"Timed out: {str(e)}"
-
-    # Run S3, Cloudinary, and GridFS in parallel with strict timeout wrappers
-    logger.info("Starting parallel backup uploads to Cloudinary, GridFS, and S3...")
-    results = await asyncio.gather(
-        upload_cloudinary_wrapper(),
-        upload_gridfs_task(),
-        upload_s3_wrapper()
-    )
-    (cloudinary_res, cloudinary_err_msg), (gridfs_id, gridfs_err_msg), (s3_res, s3_err_msg) = results
-
-    # 6. Validation: if ALL failed, raise HTTPException and delete local file
-    if not cloudinary_res and not gridfs_id and not s3_res:
-        if os.path.exists(local_path):
-            os.remove(local_path)
-        logger.error(f"Validation Failed: All backup targets (Cloudinary, GridFS, AWS S3) failed. Cloudinary: {cloudinary_err_msg}. GridFS: {gridfs_err_msg}. S3: {s3_err_msg}.")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Storage persistence failed. Cloudinary: {cloudinary_err_msg}. GridFS: {gridfs_err_msg}. S3: {s3_err_msg}."
-        )
-
-    # 7. Create a dataset record in MongoDB
-    sec_url = None
-    public_id = None
-    if cloudinary_res:
-        sec_url = cloudinary_res.get("secure_url") or cloudinary_res.get("url")
-        public_id = cloudinary_res.get("public_id")
-
+    # 3. Create a dataset record in MongoDB
     doc = {
-        "cloudinary_url": sec_url,
-        "secure_url": sec_url or (s3_res.get("s3_url") if s3_res else None),
-        "public_id": public_id,
-        "gridfs_id": gridfs_id,
-        "s3_key": s3_res.get("s3_key") if s3_res else None,
-        "s3_url": s3_res.get("s3_url") if s3_res else None,
+        "cloudinary_url": None,
+        "secure_url": None,
+        "public_id": None,
+        "gridfs_id": None,
+        "s3_key": None,
+        "s3_url": None,
         "file_path": local_path,
         "file_name": file.filename,
         "name": file.filename,
@@ -319,7 +227,7 @@ async def upload_dataset(
         "size_bytes": file_size,
         "file_hash": file_hash,
         "status": "processing",
-        "user_id": str(current_user["_id"]),
+        "user_id": user_id_str,
         "created_at": datetime.utcnow(),
     }
 
@@ -334,16 +242,19 @@ async def upload_dataset(
         )
         logger.info(f"Successfully created dataset document in MongoDB: {doc['_id']} with status 'processing'")
     except Exception as e:
-        logger.error(f"Failed to insert dataset document: {e}")
+        logger.error(f"Failed to insert dataset document: {e}", exc_info=True)
         if os.path.exists(local_path):
-            os.remove(local_path)
+            try:
+                os.remove(local_path)
+            except Exception:
+                pass
         raise HTTPException(status_code=500, detail="Database insertion failed")
 
-    # 8. Add background task for RAG indexing
+    # 4. Add background task for RAG indexing (which will also perform backup uploads first)
     from services.dataset_service import build_index_for_dataset
     background_tasks.add_task(build_index_for_dataset, doc, db)
 
-    await cache_clear_user(str(current_user["_id"]))
+    await cache_clear_user(user_id_str)
     return fmt_dataset(doc)
 
 

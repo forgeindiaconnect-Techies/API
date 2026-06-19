@@ -28,7 +28,7 @@ class APIKeyAuthMiddleware:
         cors_headers["Access-Control-Allow-Origin"] = resolved_origin
         cors_headers["Access-Control-Allow-Credentials"] = "true"
         cors_headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, HEAD"
-        cors_headers["Access-Control-Allow-Headers"] = "*"
+        cors_headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, Accept, X-API-Key"
         return JSONResponse(status_code=status_code, content=content, headers=cors_headers)
 
     async def __call__(self, scope, receive, send):

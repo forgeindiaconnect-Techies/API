@@ -324,6 +324,8 @@ def _cors_headers(request: Request) -> dict:
     return {
         "Access-Control-Allow-Origin": resolved,
         "Access-Control-Allow-Credentials": "true",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, HEAD",
+        "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept, X-API-Key",
     }
 
 @app.exception_handler(404)
@@ -399,10 +401,7 @@ async def health(request: Request):
     if request.method == "HEAD":
         return Response(status_code=200)
     return {
-        "status": "healthy",
-        "mongodb": startup_status["mongodb"],
-        "aws_s3": startup_status["aws_s3"],
-        "service": "running"
+        "status": "healthy"
     }
 
 

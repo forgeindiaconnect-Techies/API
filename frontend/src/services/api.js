@@ -1,10 +1,29 @@
 import axios from 'axios'
 import { useAuthStore } from '../store'
 
-const BASE_URL = import.meta.env.VITE_API_URL || 
-  (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
-    ? '/api/v1'
-    : 'https://api-n7cm.onrender.com/api/v1')
+const validateAndFormatBaseUrl = () => {
+  let url = import.meta.env.VITE_API_URL || import.meta.env.API_BASE_URL || import.meta.env.VITE_API_BASE_URL
+  if (url) {
+    url = url.trim()
+    if (!url.startsWith('http://') && !url.startsWith('https://') && !url.startsWith('/')) {
+      url = 'https://' + url
+    }
+    url = url.replace(/\/+$/, '')
+    console.log(`[API Config] Validated and loaded API URL: ${url}`)
+    return url
+  }
+  if (typeof window !== 'undefined') {
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+      console.log('[API Config] Defaulting to local proxy "/api/v1"')
+      return '/api/v1'
+    }
+  }
+  const defaultUrl = 'https://api-n7cm.onrender.com/api/v1'
+  console.log(`[API Config] Defaulting to Render production: ${defaultUrl}`)
+  return defaultUrl
+}
+
+const BASE_URL = validateAndFormatBaseUrl()
 
 const api = axios.create({
   baseURL: BASE_URL,
@@ -272,7 +291,7 @@ export const datasetAPI = {
     api.post('/datasets/upload', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
       onUploadProgress: onProgress,
-      timeout: 300000,
+      timeout: 120000,
     }),
   get: (id) => api.get(`/datasets/${id}`),
   delete: (id) => api.delete(`/datasets/${id}`),

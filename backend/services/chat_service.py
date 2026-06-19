@@ -88,7 +88,7 @@ async def query_dataset_rag(index_id: str, question: str, top_k: int = 5, db = N
     if status in ("building", "processing"):
         return {"answer": "Dataset indexing in progress...", "sources": []}
     
-    logger.info("✓ Dataset indexed")
+    logger.info("[OK] Dataset indexed")
         
     dataset_id = index.get("dataset_id")
     dataset = await db.datasets.find_one({"_id": get_id_query(dataset_id)})
@@ -116,7 +116,7 @@ async def query_dataset_rag(index_id: str, question: str, top_k: int = 5, db = N
             
         if hasattr(query_emb, "tolist"):
             query_emb = query_emb.tolist()
-        logger.info("✓ Embeddings generated")
+        logger.info("[OK] Embeddings generated")
     except Exception as e:
         logger.error(f"Embedding generation failed: {e}")
         return {"answer": "Embedding generation failed.", "sources": []}
@@ -125,7 +125,7 @@ async def query_dataset_rag(index_id: str, question: str, top_k: int = 5, db = N
     index_type = index.get("index_type", "chroma")
     try:
         store = VectorStore(backend=index_type, collection_name=index_id)
-        logger.info("✓ Chroma populated")
+        logger.info("[OK] Chroma populated")
         raw_results = await store.query(query_emb, top_k=top_k)
     except Exception as e:
         logger.error(f"Vector search failed: {e}")
@@ -160,7 +160,7 @@ async def query_dataset_rag(index_id: str, question: str, top_k: int = 5, db = N
             "sources": []
         }
 
-    logger.info("✓ Retrieval successful")
+    logger.info("[OK] Retrieval successful")
 
     # Construct clean prompt exactly as requested
     retrieved_chunks = "\n\n".join([f"Source: {s['source']}\nContent: {s['content']}" for s in valid_sources])
@@ -178,7 +178,7 @@ Generate a natural language response."""
 
     # Log prompt sent to LLM
     logger.info(f"Prompt sent to LLM:\n{prompt}")
-    logger.info("✓ Context sent to LLM")
+    logger.info("[OK] Context sent to LLM")
 
     answer_text = ""
     llm_connected = False
@@ -207,7 +207,7 @@ Generate a natural language response."""
             if answer_text:
                 llm_connected = True
                 logger.info("LLM response status: Success (Ollama)")
-                logger.info("✓ LLM response received")
+                logger.info("[OK] LLM response received")
         except Exception as ollama_err:
             _ollama_online = False
             _last_ollama_check = current_time
@@ -238,7 +238,7 @@ Generate a natural language response."""
                 if answer_text:
                     llm_connected = True
                     logger.info("LLM response status: Success (Gemini)")
-                    logger.info("✓ LLM response received")
+                    logger.info("[OK] LLM response received")
             except Exception as gemini_err:
                 logger.error(f"Google Gemini fallback failed for RAG: {gemini_err}")
                 logger.info(f"LLM response status: Failed (Gemini error: {gemini_err})")
@@ -261,7 +261,7 @@ Generate a natural language response."""
                 if answer_text:
                     llm_connected = True
                     logger.info("LLM response status: Success (OpenAI)")
-                    logger.info("✓ LLM response received")
+                    logger.info("[OK] LLM response received")
             except Exception as openai_err:
                 logger.error(f"OpenAI fallback failed for RAG: {openai_err}")
                 logger.info(f"LLM response status: Failed (OpenAI error: {openai_err})")
@@ -272,7 +272,7 @@ Generate a natural language response."""
     if not llm_connected:
         logger.info("LLM response status: Fallback (Offline contextual responder)")
         answer_text = generate_fallback_answer(question, valid_sources)
-        logger.info("✓ LLM response received")
+        logger.info("[OK] LLM response received")
 
     from models import SearchResult
     pydantic_sources = [

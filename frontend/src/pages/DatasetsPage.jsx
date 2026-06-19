@@ -99,7 +99,7 @@ export default function DatasetsPage() {
     return () => clearInterval(interval)
   }, [datasets, updateDataset])
 
-  const uploadWithRetry = async (file, maxRetries = 3, delayMs = 1500) => {
+  const uploadWithRetry = async (file, maxRetries = 3, baseDelayMs = 1500) => {
     let attempt = 0
     while (attempt < maxRetries) {
       try {
@@ -116,8 +116,9 @@ export default function DatasetsPage() {
         if (attempt >= maxRetries) {
           throw err
         }
-        toast.error(`Upload failed for ${file.name}. Retrying attempt ${attempt}/${maxRetries} in ${delayMs / 1000}s...`)
-        await new Promise((resolve) => setTimeout(resolve, delayMs))
+        const currentDelay = baseDelayMs * Math.pow(2, attempt - 1)
+        toast.error(`Upload failed for ${file.name}. Retrying attempt ${attempt}/${maxRetries} in ${currentDelay / 1000}s...`)
+        await new Promise((resolve) => setTimeout(resolve, currentDelay))
       }
     }
   }
@@ -151,7 +152,28 @@ export default function DatasetsPage() {
         addDataset(data)
         toast.success(`${file.name} uploaded successfully and started processing!`)
       } catch (err) {
-        toast.error(`Upload failed for ${file.name} after 3 attempts: ${err.response?.data?.detail || err.message}`)
+        let errMsg = 'Network Error'
+        if (err.response) {
+          const data = err.response.data
+          if (data) {
+            if (typeof data === 'string') errMsg = data
+            else if (data.detail) {
+              errMsg = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail)
+            } else if (data.message) errMsg = data.message
+            else if (data.error) errMsg = data.error
+          } else {
+            errMsg = `Server Error (${err.response.status})`
+          }
+        } else if (err.request) {
+          if (err.code === 'ECONNABORTED') {
+            errMsg = 'Upload timed out (120 seconds limit exceeded)'
+          } else {
+            errMsg = 'Connection failed (CORS block, protocol error, or server crashed)'
+          }
+        } else {
+          errMsg = err.message || 'Unexpected setup error'
+        }
+        toast.error(`Upload failed for ${file.name} after 3 attempts: ${errMsg}`)
       }
     }
 

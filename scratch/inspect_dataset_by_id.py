@@ -1,43 +1,37 @@
 import asyncio
 import os
 import sys
-from bson import ObjectId
 
-# Add backend directory to sys.path
-backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend"))
-sys.path.insert(0, backend_dir)
+# Add backend directory to path so we can import config/database
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../backend")))
 
 from database import connect_db, get_db
+from bson import ObjectId
 
-async def main():
+async def inspect_dataset():
     await connect_db()
     db = get_db()
-    
-    # Query by ObjectId or string ID
-    dataset_id = "6a312095a69ee21d5f5fb024"
-    d = None
-    try:
-        d = await db.datasets.find_one({"_id": ObjectId(dataset_id)})
-    except Exception:
-        pass
-    
-    if not d:
-        d = await db.datasets.find_one({"_id": dataset_id})
-        
-    if not d:
-        print("Dataset not found by ObjectId or string!")
-        # Let's list the latest datasets
-        print("\nLast 5 datasets in db:")
-        async for item in db.datasets.find().sort("created_at", -1).limit(5):
-            print(f"ID: {item['_id']}, Name: {item.get('name')}, Status: {item.get('status')}, Error: {item.get('error_message')}")
+    if db is None:
+        print("Failed to connect to database.")
         return
-        
-    print("Full Dataset Document:")
-    for k, v in d.items():
-        if k not in ["preview", "stats"]:
-            print(f"  {k}: {v}")
-        else:
-            print(f"  {k}: [length/size: {len(str(v))}]")
+
+    dataset_id = "6a31320941135333cd2aecd7"
+    print(f"Querying dataset ID: {dataset_id}")
+    
+    # Try finding by ObjectId or string ID
+    doc = await db.datasets.find_one({"_id": dataset_id})
+    if not doc:
+        try:
+            doc = await db.datasets.find_one({"_id": ObjectId(dataset_id)})
+        except Exception:
+            pass
+            
+    if doc:
+        print("Dataset Document found:")
+        for k, v in doc.items():
+            print(f"  {k}: {v} (Type: {type(v).__name__})")
+    else:
+        print("Dataset Document NOT found in database.")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(inspect_dataset())

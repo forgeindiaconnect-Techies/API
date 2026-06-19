@@ -62,7 +62,7 @@ class RequestLoggingMiddleware:
                     response_headers.append((b"access-control-allow-origin", resolved_origin.encode("utf-8")))
                     response_headers.append((b"access-control-allow-credentials", b"true"))
                     response_headers.append((b"access-control-allow-methods", b"GET, POST, PUT, DELETE, OPTIONS, HEAD"))
-                    response_headers.append((b"access-control-allow-headers", b"*"))
+                    response_headers.append((b"access-control-allow-headers", b"Authorization, Content-Type, Accept, X-API-Key"))
                     response_headers.append((b"access-control-expose-headers", b"*"))
                 
                 # Add process time header
@@ -74,7 +74,7 @@ class RequestLoggingMiddleware:
                 if not is_health:
                     status_code = message.get("status", 200)
                     logger.info(
-                        f"{method} {path} → {status_code} ({duration}ms) | "
+                        f"{method} {path} -> {status_code} ({duration}ms) | "
                         f"CORS Allow-Origin: {resolved_origin if not has_cors else 'Already Set'}"
                     )
             
@@ -111,7 +111,7 @@ class AuthMiddleware:
         cors_headers["Access-Control-Allow-Origin"] = resolved_origin
         cors_headers["Access-Control-Allow-Credentials"] = "true"
         cors_headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, HEAD"
-        cors_headers["Access-Control-Allow-Headers"] = "*"
+        cors_headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, Accept, X-API-Key"
         return JSONResponse(status_code=status_code, content=content, headers=cors_headers)
 
     async def __call__(self, scope, receive, send):
