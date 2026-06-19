@@ -5,7 +5,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer
 } from 'recharts'
-import { Table, FileText, Brain, RefreshCw, Loader, AlertCircle, Sparkles } from 'lucide-react'
+import { Table, FileText, Brain, RefreshCw, Loader, AlertCircle, Sparkles, UploadCloud, Trash2 } from 'lucide-react'
 import { datasetAPI, multimodalAPI } from '../services/api'
 import toast from 'react-hot-toast'
 
@@ -179,6 +179,17 @@ export default function DatasetDetailPage() {
     }
   }
 
+  const handleDelete = async () => {
+    if (!window.confirm(`Delete "${dataset?.name}"? This cannot be undone.`)) return
+    try {
+      await datasetAPI.delete(id)
+      toast.success('Dataset deleted')
+      navigate('/datasets')
+    } catch (err) {
+      toast.error(`Failed to delete: ${err.response?.data?.detail || err.message}`)
+    }
+  }
+
   const handleGenerateAISummary = async () => {
     if (!dataset) return
     setGeneratingSummary(true)
@@ -310,18 +321,55 @@ Generate a structured response with these EXACT headings:
   }
 
   if (dataset.status === 'error' || dataset.status === 'failed') {
+    // Detect irrecoverable datasets: file is gone from disk AND no cloud backup was ever created.
+    // Retrying will never work — the original file no longer exists anywhere.
+    const isIrrecoverable = dataset.error_message &&
+      (dataset.error_message.includes('All recovery methods') ||
+       dataset.error_message.includes('Local File was MISSING') ||
+       dataset.error_message.includes('File Recovery Failure') ||
+       dataset.error_message.includes('File Access Failure'))
+
     return (
       <div className="flex flex-col items-center justify-center min-h-[400px] text-center p-6 space-y-4">
-        <AlertCircle size={48} style={{ color: '#ef4444' }} />
-        <div className="space-y-1">
-          <h3 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>Processing Failed</h3>
-          <p className="text-xs max-w-md border border-dashed rounded-lg p-3 mt-2 bg-red-500/10 text-red-400 font-mono text-left break-all" style={{ borderColor: 'rgba(239, 68, 68, 0.2)' }}>
-            {dataset.error_message || 'An error occurred while attempting to parse or process this file.'}
-          </p>
+        {isIrrecoverable ? (
+          <UploadCloud size={48} style={{ color: '#f59e0b' }} />
+        ) : (
+          <AlertCircle size={48} style={{ color: '#ef4444' }} />
+        )}
+        <div className="space-y-2">
+          <h3 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>
+            {isIrrecoverable ? 'File No Longer Available' : 'Processing Failed'}
+          </h3>
+          {isIrrecoverable ? (
+            <>
+              <p className="text-sm max-w-sm" style={{ color: 'var(--text-muted)' }}>
+                This dataset's file was lost during a server restart and was never backed up to cloud storage.
+                It cannot be recovered automatically.
+              </p>
+              <p className="text-xs px-4 py-2 rounded-lg font-medium" style={{ color: '#f59e0b', background: 'rgba(245, 158, 11, 0.1)' }}>
+                💡 Please delete this dataset and re-upload the original file.
+              </p>
+            </>
+          ) : (
+            <p className="text-xs max-w-md border border-dashed rounded-lg p-3 mt-2 bg-red-500/10 text-red-400 font-mono text-left break-all" style={{ borderColor: 'rgba(239, 68, 68, 0.2)' }}>
+              {dataset.error_message || 'An error occurred while attempting to parse or process this file.'}
+            </p>
+          )}
         </div>
-        <button onClick={handleReprocess} className="btn-primary">
-          <RefreshCw size={12} /> Retry Reprocess
-        </button>
+        <div className="flex gap-3">
+          {isIrrecoverable ? (
+            <button onClick={handleDelete} className="btn-primary" style={{ background: '#ef4444' }}>
+              <Trash2 size={12} /> Delete & Re-upload
+            </button>
+          ) : (
+            <button onClick={handleReprocess} disabled={reprocessing} className="btn-primary">
+              <RefreshCw size={12} className={reprocessing ? 'animate-spin' : ''} /> Retry Reprocess
+            </button>
+          )}
+          <button onClick={() => navigate('/datasets')} className="btn-ghost">
+            Back to Datasets
+          </button>
+        </div>
       </div>
     )
   }

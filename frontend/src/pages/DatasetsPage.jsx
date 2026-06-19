@@ -5,7 +5,7 @@ import { useDropzone } from 'react-dropzone'
 import {
   Upload, File, FileText, Table, Image, Mic, Archive,
   Trash2, Eye, Play, Search, X, CheckCircle,
-  Clock, AlertCircle, Loader
+  Clock, AlertCircle, Loader, AlertTriangle
 } from 'lucide-react'
 import { useDatasetStore } from '../store'
 import { datasetAPI } from '../services/api'
@@ -20,10 +20,23 @@ const fileTypeIcon = (type) => {
   return File
 }
 
-const statusBadge = (status) => {
-  switch (status) {
+const isIrrecoverableDataset = (ds) => {
+  return ds.status === 'failed' &&
+    ds.error_message &&
+    (ds.error_message.includes('All recovery methods') ||
+     ds.error_message.includes('Local File was MISSING') ||
+     ds.error_message.includes('File Recovery Failure') ||
+     ds.error_message.includes('File Access Failure'))
+}
+
+const statusBadge = (ds) => {
+  if (isIrrecoverableDataset(ds)) {
+    return <span className="badge badge-yellow flex items-center gap-1"><AlertTriangle size={9} /> Re-upload</span>
+  }
+  switch (ds.status) {
     case 'ready':
     case 'completed':
+    case 'indexed':
       return <span className="badge badge-green flex items-center gap-1"><CheckCircle size={9} /> Ready</span>
     case 'processing':
       return <span className="badge badge-yellow flex items-center gap-1"><Clock size={9} /> Processing</span>
@@ -408,7 +421,7 @@ export default function DatasetsPage() {
                 <div className="w-20 text-xs" style={{ color: 'var(--text-secondary)' }}>
                   {ds.rows?.toLocaleString() || '—'}
                 </div>
-                <div className="w-24">{statusBadge(ds.status)}</div>
+                <div className="w-24">{statusBadge(ds)}</div>
                 <div className="w-24 text-xs" style={{ color: 'var(--text-muted)' }}>
                   {ds.created_at ? new Date(ds.created_at).toLocaleDateString() : '—'}
                 </div>
@@ -423,16 +436,27 @@ export default function DatasetsPage() {
                   >
                     <Eye size={13} />
                   </button>
-                  <button
-                    onClick={(e) => handleReprocess(ds.id, e)}
-                    className="p-1.5 rounded transition-colors"
-                    style={{ color: 'var(--text-muted)' }}
-                    onMouseEnter={(e) => e.currentTarget.style.color = '#10b981'}
-                    onMouseLeave={(e) => e.currentTarget.style.color = 'var(--text-muted)'}
-                    title="Process"
-                  >
-                    <Play size={13} />
-                  </button>
+                  {isIrrecoverableDataset(ds) ? (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); navigate(`/datasets/${ds.id}`) }}
+                      className="p-1.5 rounded transition-colors"
+                      style={{ color: '#f59e0b' }}
+                      title="File lost — click to view and delete"
+                    >
+                      <AlertTriangle size={13} />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={(e) => handleReprocess(ds.id, e)}
+                      className="p-1.5 rounded transition-colors"
+                      style={{ color: 'var(--text-muted)' }}
+                      onMouseEnter={(e) => e.currentTarget.style.color = '#10b981'}
+                      onMouseLeave={(e) => e.currentTarget.style.color = 'var(--text-muted)'}
+                      title="Process"
+                    >
+                      <Play size={13} />
+                    </button>
+                  )}
                   <button
                     onClick={(e) => handleDelete(ds.id, ds.name, e)}
                     className="p-1.5 rounded transition-colors"
