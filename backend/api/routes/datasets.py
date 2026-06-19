@@ -187,63 +187,62 @@ async def upload_dataset(
         logger.error(f"Failed to save and validate temp file locally: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to store file: {str(e)}")
 
-    # 4. Cloudinary upload (Sync/Await) with retry
-    cloudinary_res = None
-    cloudinary_err_msg = None
-    if settings.CLOUDINARY_CLOUD_NAME and settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET:
-        for attempt in range(3):
+    # 4. Parallel Upload Strategy (Cloudinary, GridFS, AWS S3) to prevent API Timeouts
+    async def upload_cloudinary_task():
+        if not (settings.CLOUDINARY_CLOUD_NAME and settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET):
+            return None, "Cloudinary credentials not configured"
+        err_msg = None
+        for attempt in range(2):
             try:
-                logger.info(f"Uploading {file.filename} to Cloudinary (Attempt {attempt+1}/3)...")
+                logger.info(f"Uploading {file.filename} to Cloudinary (Attempt {attempt+1}/2)...")
                 from services.cloudinary_service import upload_file_to_cloudinary
-                cloudinary_res = await upload_file_to_cloudinary(file_bytes, file.filename, resource_type="raw")
-                logger.info(f"Cloudinary upload succeeded. Complete response: {cloudinary_res}")
-                break
-            except Exception as upload_err:
-                cloudinary_err_msg = str(upload_err)
-                logger.error(f"Cloudinary upload attempt {attempt+1} failed: {upload_err}")
-                if attempt < 2:
-                    await asyncio.sleep(1)
-    else:
-        cloudinary_err_msg = "Cloudinary credentials not configured"
-        logger.warning("Cloudinary credentials not configured. Skipping Cloudinary upload.")
+                res = await upload_file_to_cloudinary(file_bytes, file.filename, resource_type="raw")
+                logger.info("Cloudinary upload succeeded.")
+                return res, None
+            except Exception as e:
+                err_msg = str(e)
+                logger.error(f"Cloudinary upload attempt {attempt+1} failed: {e}")
+                # Don't retry if permanent auth error
+                if "403" in err_msg or "credentials" in err_msg.lower() or "unauthorized" in err_msg.lower():
+                    break
+                if attempt < 1:
+                    await asyncio.sleep(0.5)
+        return None, err_msg
 
-    # 5. GridFS upload (Sync/Await) with retry
-    gridfs_id = None
-    gridfs_err_msg = None
-    for attempt in range(3):
-        try:
-            logger.info(f"Backing up {file.filename} to GridFS (Attempt {attempt+1}/3)...")
-            from services.dataset_service import upload_file_to_gridfs
-            content_type = "application/octet-stream"
-            if ext == "txt":
-                content_type = "text/plain"
-            elif ext == "csv":
-                content_type = "text/csv"
-            elif ext == "pdf":
-                content_type = "application/pdf"
-            elif ext == "json":
-                content_type = "application/json"
-            
-            gridfs_id = await upload_file_to_gridfs(file_bytes, file.filename, content_type)
-            if not gridfs_id:
-                gridfs_err_msg = "GridFS upload returned empty ID"
-                logger.error(f"GridFS upload returned empty ID (Attempt {attempt+1}/3)")
-            else:
-                logger.info(f"Successfully uploaded to GridFS with ID: {gridfs_id}")
-                break
-        except Exception as gridfs_err:
-            gridfs_err_msg = str(gridfs_err)
-            logger.error(f"GridFS backup attempt {attempt+1} failed: {gridfs_err}")
-            if attempt < 2:
-                await asyncio.sleep(1)
-
-    # 5.5 AWS S3 upload with retry
-    s3_res = None
-    s3_err_msg = None
-    if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY and settings.AWS_S3_BUCKET:
-        for attempt in range(3):
+    async def upload_gridfs_task():
+        err_msg = None
+        for attempt in range(2):
             try:
-                logger.info(f"Backing up {file.filename} to AWS S3 (Attempt {attempt+1}/3)...")
+                logger.info(f"Backing up {file.filename} to GridFS (Attempt {attempt+1}/2)...")
+                from services.dataset_service import upload_file_to_gridfs
+                content_type = "application/octet-stream"
+                if ext == "txt":
+                    content_type = "text/plain"
+                elif ext == "csv":
+                    content_type = "text/csv"
+                elif ext == "pdf":
+                    content_type = "application/pdf"
+                elif ext == "json":
+                    content_type = "application/json"
+                res = await upload_file_to_gridfs(file_bytes, file.filename, content_type)
+                if res:
+                    logger.info("GridFS backup succeeded.")
+                    return res, None
+                err_msg = "GridFS upload returned empty ID"
+            except Exception as e:
+                err_msg = str(e)
+                logger.error(f"GridFS upload attempt {attempt+1} failed: {e}")
+                if attempt < 1:
+                    await asyncio.sleep(0.5)
+        return None, err_msg
+
+    async def upload_s3_task():
+        if not (settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY and settings.AWS_S3_BUCKET):
+            return None, "AWS S3 credentials not configured"
+        err_msg = None
+        for attempt in range(2):
+            try:
+                logger.info(f"Backing up {file.filename} to AWS S3 (Attempt {attempt+1}/2)...")
                 from services.s3_service import upload_file_to_s3
                 content_type = "application/octet-stream"
                 if ext == "txt":
@@ -254,17 +253,40 @@ async def upload_dataset(
                     content_type = "application/pdf"
                 elif ext == "json":
                     content_type = "application/json"
-                s3_res = await upload_file_to_s3(file_bytes, file.filename, content_type)
-                logger.info(f"AWS S3 upload succeeded. Key: {s3_res.get('s3_key')}")
-                break
-            except Exception as s3_err:
-                s3_err_msg = str(s3_err)
-                logger.error(f"AWS S3 backup attempt {attempt+1} failed: {s3_err}")
-                if attempt < 2:
-                    await asyncio.sleep(1)
-    else:
-        s3_err_msg = "AWS S3 credentials not configured"
-        logger.warning("AWS S3 credentials not configured. Skipping S3 upload.")
+                res = await upload_file_to_s3(file_bytes, file.filename, content_type)
+                logger.info("AWS S3 backup succeeded.")
+                return res, None
+            except Exception as e:
+                err_msg = str(e)
+                logger.error(f"AWS S3 backup attempt {attempt+1} failed: {e}")
+                if "403" in err_msg or "credentials" in err_msg.lower() or "forbidden" in err_msg.lower():
+                    break
+                if attempt < 1:
+                    await asyncio.sleep(0.5)
+        return None, err_msg
+
+    async def upload_cloudinary_wrapper():
+        try:
+            return await asyncio.wait_for(upload_cloudinary_task(), timeout=8.0)
+        except Exception as e:
+            logger.warning(f"Cloudinary upload timed out or failed: {e}")
+            return None, f"Timed out: {str(e)}"
+
+    async def upload_s3_wrapper():
+        try:
+            return await asyncio.wait_for(upload_s3_task(), timeout=8.0)
+        except Exception as e:
+            logger.warning(f"AWS S3 upload timed out or failed: {e}")
+            return None, f"Timed out: {str(e)}"
+
+    # Run S3, Cloudinary, and GridFS in parallel with strict timeout wrappers
+    logger.info("Starting parallel backup uploads to Cloudinary, GridFS, and S3...")
+    results = await asyncio.gather(
+        upload_cloudinary_wrapper(),
+        upload_gridfs_task(),
+        upload_s3_wrapper()
+    )
+    (cloudinary_res, cloudinary_err_msg), (gridfs_id, gridfs_err_msg), (s3_res, s3_err_msg) = results
 
     # 6. Validation: if ALL failed, raise HTTPException and delete local file
     if not cloudinary_res and not gridfs_id and not s3_res:

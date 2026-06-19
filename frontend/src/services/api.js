@@ -272,6 +272,7 @@ export const datasetAPI = {
     api.post('/datasets/upload', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
       onUploadProgress: onProgress,
+      timeout: 300000,
     }),
   get: (id) => api.get(`/datasets/${id}`),
   delete: (id) => api.delete(`/datasets/${id}`),
