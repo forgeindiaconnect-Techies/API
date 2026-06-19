@@ -10,6 +10,7 @@ from auth.utils import get_current_user, validate_object_id, get_id_query
 from database import get_db
 from config import settings
 from datasets.processor import process_dataset, run_eda
+from utils.cache import cache_get, cache_set, cache_clear_user
 
 router = APIRouter(prefix="/datasets", tags=["Datasets"])
 logger = logging.getLogger(__name__)
@@ -82,7 +83,17 @@ async def fetch_user_dataset_or_raise(dataset_id: str, current_user: dict) -> di
 
 
 @router.get("")
-async def list_datasets(current_user=Depends(get_current_user)):
+async def list_datasets(
+    limit: Optional[int] = None,
+    skip: int = 0,
+    current_user=Depends(get_current_user)
+):
+    user_id = str(current_user["_id"])
+    cache_key = f"datasets:user:{user_id}:limit:{limit}:skip:{skip}"
+    cached_val = await cache_get(cache_key)
+    if cached_val is not None:
+        return cached_val
+
     db = get_db()
     if db is None:
         logger.error("list_datasets: Database connection wrapper is None")
@@ -94,7 +105,12 @@ async def list_datasets(current_user=Depends(get_current_user)):
     try:
         async def fetch_db_datasets():
             datasets = []
-            async for d in db.datasets.find({"user_id": user_query}):
+            cursor = db.datasets.find({"user_id": user_query}).sort("created_at", -1)
+            if skip > 0:
+                cursor = cursor.skip(skip)
+            if limit is not None:
+                cursor = cursor.limit(limit)
+            async for d in cursor:
                 try:
                     datasets.append(fmt_dataset(d))
                 except Exception as fe:
@@ -111,22 +127,8 @@ async def list_datasets(current_user=Depends(get_current_user)):
         logger.error(f"Failed to query datasets from MongoDB: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Database query failed: {str(e)}")
 
-    def sort_key(x):
-        val = x.get("created_at")
-        if isinstance(val, datetime):
-            return val
-        if isinstance(val, str):
-            try:
-                return datetime.fromisoformat(val.replace("Z", "+00:00"))
-            except ValueError:
-                pass
-        return datetime.min
-
-    try:
-        return sorted(datasets, key=sort_key, reverse=True)
-    except Exception as se:
-        logger.error(f"Failed to sort datasets: {se}", exc_info=True)
-        return datasets
+    await cache_set(cache_key, datasets, ttl=300)
+    return datasets
 
 
 @router.post("/upload", status_code=202)
@@ -295,6 +297,7 @@ async def upload_dataset(
     from services.dataset_service import build_index_for_dataset
     background_tasks.add_task(build_index_for_dataset, doc, db)
 
+    await cache_clear_user(str(current_user["_id"]))
     return fmt_dataset(doc)
 
 
@@ -388,6 +391,7 @@ async def delete_dataset(dataset_id: str, current_user=Depends(get_current_user)
     # 4. Delete the dataset document from MongoDB
     await db.datasets.delete_one({"_id": d["_id"]})
     logger.info(f"Successfully deleted dataset document {dataset_id_str} from db.datasets")
+    await cache_clear_user(str(current_user["_id"]))
     return {"message": "Dataset and all associated indexes/files deleted successfully"}
 
 
@@ -504,6 +508,7 @@ async def reprocess_dataset(
     from services.dataset_service import build_index_for_dataset
     background_tasks.add_task(build_index_for_dataset, d, db)
     
+    await cache_clear_user(str(current_user["_id"]))
     # Return formatted info immediately with status 'processing'
     d["status"] = "processing"
     return fmt_dataset(d)

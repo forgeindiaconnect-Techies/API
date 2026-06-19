@@ -3,21 +3,27 @@ from datetime import datetime, timedelta
 from auth.utils import get_current_user
 from database import get_db
 import asyncio
+from utils.cache import cache_get, cache_set
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
 
 @router.get("/dashboard")
 async def get_dashboard(current_user=Depends(get_current_user)):
-    db = get_db()
     user_id = str(current_user["_id"])
+    cache_key = f"dashboard:user:{user_id}"
+    cached_val = await cache_get(cache_key)
+    if cached_val is not None:
+        return cached_val
+
+    db = get_db()
     now = datetime.utcnow()
 
     one_day_ago = now - timedelta(days=1)
     seven_days_ago = now - timedelta(days=7)
     fourteen_days_ago = now - timedelta(days=14)
 
-    # Helper task for tokens aggregation
+    # Helper task for tokens aggregation (optimized to avoid dynamic string length computation)
     async def get_total_tokens():
         if hasattr(db.messages._collection, "aggregate"):
             try:
@@ -26,12 +32,7 @@ async def get_dashboard(current_user=Depends(get_current_user)):
                     {"$group": {
                         "_id": None,
                         "total_tokens": {
-                            "$sum": {
-                                "$ifNull": [
-                                    "$tokens_used",
-                                    {"$max": [1, {"$floor": {"$divide": [{"$strLenCP": {"$ifNull": ["$content", ""]}}, 4]}}]}
-                                ]
-                            }
+                            "$sum": {"$ifNull": ["$tokens_used", 0]}
                         }
                     }}
                 ]
@@ -97,12 +98,7 @@ async def get_dashboard(current_user=Depends(get_current_user)):
                                 "else": "$created_at"
                             }
                         },
-                        "tokens": {
-                            "$ifNull": [
-                                "$tokens_used",
-                                {"$max": [1, {"$floor": {"$divide": [{"$strLenCP": {"$ifNull": ["$content", ""]}}, 4]}}]}
-                            ]
-                        }
+                        "tokens": {"$ifNull": ["$tokens_used", 0]}
                     }
                 },
                 {
@@ -230,7 +226,7 @@ async def get_dashboard(current_user=Depends(get_current_user)):
             "tokens": stats["tokens"]
         })
 
-    return {
+    response_data = {
         "total_requests": total_requests,
         "total_tokens": total_tokens,
         "active_models": model_count,
@@ -244,6 +240,8 @@ async def get_dashboard(current_user=Depends(get_current_user)):
         "top_models": top_models,
         "daily_requests": daily_requests,
     }
+    await cache_set(cache_key, response_data, ttl=300)
+    return response_data
 
 
 @router.get("/usage")
@@ -251,8 +249,13 @@ async def get_usage(
     days: int = Query(7, ge=1, le=90),
     current_user=Depends(get_current_user)
 ):
-    db = get_db()
     user_id = str(current_user["_id"])
+    cache_key = f"usage:user:{user_id}:days:{days}"
+    cached_val = await cache_get(cache_key)
+    if cached_val is not None:
+        return cached_val
+
+    db = get_db()
     now = datetime.utcnow()
     # Initialize stats daily binning map
     daily_stats = { (now - timedelta(days=i)).date(): {"requests": 0, "tokens": 0} for i in range(days) }
@@ -281,12 +284,7 @@ async def get_usage(
                                 "else": "$created_at"
                             }
                         },
-                        "tokens": {
-                            "$ifNull": [
-                                "$tokens_used",
-                                {"$max": [1, {"$floor": {"$divide": [{"$strLenCP": {"$ifNull": ["$content", ""]}}, 4]}}]}
-                            ]
-                        }
+                        "tokens": {"$ifNull": ["$tokens_used", 0]}
                     }
                 },
                 {
@@ -345,22 +343,29 @@ async def get_usage(
             "errors": 0,
         })
 
-    return {
+    response_data = {
         "period": f"Last {days} days",
         "data": data
     }
+    await cache_set(cache_key, response_data, ttl=300)
+    return response_data
 
 
 @router.get("/api")
 async def get_api_stats(current_user=Depends(get_current_user)):
-    db = get_db()
     user_id = str(current_user["_id"])
+    cache_key = f"api_stats:user:{user_id}"
+    cached_val = await cache_get(cache_key)
+    if cached_val is not None:
+        return cached_val
+
+    db = get_db()
 
     total_calls = 0
     async for key in db.api_keys.find({"user_id": user_id}):
         total_calls += key.get("requests_count", 0)
 
-    return {
+    response_data = {
         "endpoints": [
             {"path": "/api/v1/chat", "calls": total_calls, "p50": 180, "p99": 2400, "errors": 0},
         ] if total_calls > 0 else [],
@@ -369,18 +374,25 @@ async def get_api_stats(current_user=Depends(get_current_user)):
         "error_rate": 0.0,
         "avg_latency_ms": 298.0 if total_calls > 0 else 0.0,
     }
+    await cache_set(cache_key, response_data, ttl=300)
+    return response_data
 
 
 @router.get("/models/{model_id}")
 async def get_model_performance(model_id: str, current_user=Depends(get_current_user)):
-    db = get_db()
     user_id = str(current_user["_id"])
+    cache_key = f"model_performance:user:{user_id}:model:{model_id}"
+    cached_val = await cache_get(cache_key)
+    if cached_val is not None:
+        return cached_val
+
+    db = get_db()
 
     inference_count = 0
     async for conv in db.conversations.find({"user_id": user_id, "model": model_id}):
         inference_count += conv.get("message_count", 0) // 2
 
-    return {
+    response_data = {
         "model_id": model_id,
         "inference_count": inference_count,
         "avg_latency_ms": 95.0 if inference_count > 0 else 0.0,
@@ -394,4 +406,5 @@ async def get_model_performance(model_id: str, current_user=Depends(get_current_
             "neutral": 0,
         } if inference_count > 0 else {"positive": 0, "negative": 0, "neutral": 0}
     }
-
+    await cache_set(cache_key, response_data, ttl=300)
+    return response_data

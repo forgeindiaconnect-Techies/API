@@ -8,21 +8,18 @@ from models import TrainingConfig, TrainingJobResponse, ModelResponse, PredictRe
 from auth.utils import get_current_user, verify_key_permissions, get_id_query
 from database import get_db
 from training.trainer import start_training_job
-from redis_client import get_redis
+from utils.cache import cache_get, cache_set, cache_clear_user
 
 router = APIRouter(prefix="/models", tags=["Models"])
 logger = logging.getLogger(__name__)
 
 
 async def invalidate_models_cache(user_id: str):
-    redis_client = get_redis()
-    if redis_client:
-        try:
-            cache_key = f"models:user:{user_id}"
-            await redis_client.delete(cache_key)
-            logger.info(f"Invalidated models cache for user {user_id}")
-        except Exception as e:
-            logger.error(f"Failed to delete models cache: {e}")
+    try:
+        await cache_clear_user(user_id)
+        logger.info(f"Invalidated cache for user {user_id}")
+    except Exception as e:
+        logger.error(f"Failed to clear cache: {e}")
 
 
 def fmt_model(m: dict) -> dict:
@@ -67,23 +64,18 @@ async def list_models(
     current_user=Depends(get_current_user)
 ):
     user_id = str(current_user["_id"])
-    redis_client = get_redis()
-    cache_key = f"models:user:{user_id}"
-    cached_models = None
-    
-    if redis_client:
-        try:
-            cached_data = await redis_client.get(cache_key)
-            if cached_data:
-                cached_models = json.loads(cached_data)
-                logger.info(f"Cache hit: Loaded models for user {user_id}")
-        except Exception as e:
-            logger.error(f"Failed to fetch models cache: {e}")
+    cache_key = f"models:user:{user_id}:limit:{limit}:skip:{skip}"
+    cached_models = await cache_get(cache_key)
             
     if cached_models is None:
         db = get_db()
         models = []
-        async for m in db.models.find({"user_id": user_id}):
+        cursor = db.models.find({"user_id": user_id}).sort("created_at", -1)
+        if skip > 0:
+            cursor = cursor.skip(skip)
+        if limit is not None:
+            cursor = cursor.limit(limit)
+        async for m in cursor:
             model_data = fmt_model(m)
             if model_data["status"] == "training":
                 job = await db.training_jobs.find_one({"model_id": model_data["id"]})
@@ -93,28 +85,10 @@ async def list_models(
                     model_data["progress"] = 0.0
             models.append(model_data)
         
-        cached_models = sorted(models, key=lambda x: x["created_at"], reverse=True)
+        cached_models = models
+        await cache_set(cache_key, cached_models, ttl=300)
         
-        if redis_client:
-            try:
-                class DateTimeEncoder(json.JSONEncoder):
-                    def default(self, obj):
-                        if isinstance(obj, datetime):
-                            return obj.isoformat()
-                        return super().default(obj)
-                
-                await redis_client.setex(cache_key, 300, json.dumps(cached_models, cls=DateTimeEncoder))
-                logger.info(f"Cached models for user {user_id}")
-            except Exception as e:
-                logger.error(f"Failed to set models cache: {e}")
-                
-    res = cached_models
-    if skip > 0 or limit is not None:
-        start_idx = skip
-        end_idx = (skip + limit) if limit is not None else len(res)
-        res = res[start_idx:end_idx]
-        
-    return res
+    return cached_models
 
 
 @router.get("/training/progress")

@@ -145,3 +145,12 @@ export const useApiKeyStore = create((set) => ({
       apiKeys: s.apiKeys.map((k) => (k.id === id ? { ...k, ...updates } : k)),
     })),
 }))
+
+export const useDashboardStore = create((set) => ({
+  dashboardData: null,
+  loading: false,
+  error: null,
+  setDashboardData: (data) => set({ dashboardData: data }),
+  setLoading: (l) => set({ loading: l }),
+  setError: (e) => set({ error: e }),
+}))

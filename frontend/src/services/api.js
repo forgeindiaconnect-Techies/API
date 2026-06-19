@@ -267,7 +267,7 @@ export const chatAPI = {
 
 // Datasets
 export const datasetAPI = {
-  list: () => api.get('/datasets'),
+  list: (params) => api.get('/datasets', { params }),
   upload: (formData, onProgress) =>
     api.post('/datasets/upload', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },

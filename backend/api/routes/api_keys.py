@@ -10,6 +10,7 @@ from auth.utils import get_current_user
 from database import get_db
 from bson import ObjectId
 from bson.errors import InvalidId
+from utils.cache import cache_clear_user
 
 router = APIRouter(tags=["API Keys"])
 logger = logging.getLogger(__name__)
@@ -108,6 +109,7 @@ async def create_api_key(data: ApiKeyCreate, current_user=Depends(get_current_us
     doc["_id"] = result.inserted_id
     logger.info(f"Successfully generated API Key '{data.name}' (ID: {doc['_id']}) for user '{current_user.get('email')}'")
 
+    await cache_clear_user(str(current_user["_id"]))
     return fmt_key(doc, mask=False, raw_key=raw_key)
 
 
@@ -128,6 +130,7 @@ async def revoke_api_key(key_id: str, current_user=Depends(get_current_user)):
 
     await db.api_keys.update_one(query, {"$set": {"is_active": False}})
     logger.info(f"Successfully soft-deleted API Key ID '{key_id}' for user '{current_user.get('email')}'")
+    await cache_clear_user(str(current_user["_id"]))
     return {"message": "API key revoked"}
 
 
@@ -147,6 +150,7 @@ async def rename_api_key(key_id: str, data: ApiKeyUpdate, current_user=Depends(g
     await db.api_keys.update_one(query, {"$set": {"name": data.name}})
     
     updated_k = await db.api_keys.find_one(query)
+    await cache_clear_user(str(current_user["_id"]))
     return fmt_key(updated_k, mask=True)
 
 
@@ -179,6 +183,7 @@ async def rotate_api_key(key_id: str, current_user=Depends(get_current_user)):
     
     updated_k = await db.api_keys.find_one(query)
     logger.info(f"Successfully rotated API Key ID '{key_id}' for user '{current_user.get('email')}'")
+    await cache_clear_user(str(current_user["_id"]))
     return fmt_key(updated_k, mask=False, raw_key=raw_key)
 
 

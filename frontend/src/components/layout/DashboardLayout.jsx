@@ -1,6 +1,6 @@
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { useAuthStore, useUIStore } from '../../store'
+import { useAuthStore, useUIStore, useDashboardStore } from '../../store'
 import {
   LayoutDashboard, MessageSquare, Database, Brain, Cpu,
   Search, Key, BarChart3, Settings, Layers,
@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import toast from 'react-hot-toast'
+import { analyticsAPI } from '../../services/api'
 
 const navItems = [
   { icon: LayoutDashboard, label: 'Dashboard', path: '/dashboard' },
@@ -27,6 +28,27 @@ export default function DashboardLayout() {
   const { sidebarOpen, theme, toggleSidebar, setTheme } = useUIStore()
   const navigate = useNavigate()
   const location = useLocation()
+  
+  const setDashboardData = useDashboardStore(state => state.setDashboardData)
+  const setDashboardLoading = useDashboardStore(state => state.setLoading)
+  
+  // Preload dashboard stats as soon as the layout mounts
+  useEffect(() => {
+    if (user) {
+      const preload = async () => {
+        try {
+          setDashboardLoading(true)
+          const { data } = await analyticsAPI.getDashboard()
+          setDashboardData(data)
+        } catch (err) {
+          console.error('Failed to preload dashboard stats:', err)
+        } finally {
+          setDashboardLoading(false)
+        }
+      }
+      preload()
+    }
+  }, [user, setDashboardData, setDashboardLoading])
   
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const [notiOpen, setNotiOpen] = useState(false)

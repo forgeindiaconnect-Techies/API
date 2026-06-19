@@ -6,11 +6,11 @@ import {
 } from 'recharts'
 import {
   MessageSquare, Database, Brain, Key, TrendingUp, TrendingDown,
-  Server, Clock, ArrowRight, Upload, Play, ShieldAlert, Activity,
-  Sparkles, ShieldCheck, Cpu, HardDrive, Users, Zap
+  Clock, ArrowRight, Upload, Sparkles, Activity,
+  HardDrive, Users
 } from 'lucide-react'
-import { useAuthStore } from '../store'
-import { analyticsAPI } from '../services/api'
+import { useAuthStore, useDashboardStore } from '../store'
+import { analyticsAPI, datasetAPI } from '../services/api'
 import { useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
 
@@ -126,9 +126,12 @@ const CustomTooltip = ({ active, payload, label }) => {
 export default function DashboardPage() {
   const { user } = useAuthStore()
   const navigate = useNavigate()
+  const { dashboardData, setDashboardData } = useDashboardStore()
   
-  const [loading, setLoading] = useState(true)
-  const [data, setData] = useState(null)
+  const [data, setData] = useState(dashboardData)
+  const [loading, setLoading] = useState(!dashboardData)
+  const [recentDatasets, setRecentDatasets] = useState([])
+  const [loadingDatasets, setLoadingDatasets] = useState(true)
   
   // Real-time clock states
   const [timeStr, setTimeStr] = useState(new Date().toLocaleTimeString())
@@ -140,10 +143,13 @@ export default function DashboardPage() {
   }))
 
   const fetchDashboardStats = async () => {
-    setLoading(true)
+    if (!data) {
+      setLoading(true)
+    }
     try {
       const { data: stats } = await analyticsAPI.getDashboard()
       setData(stats)
+      setDashboardData(stats)
     } catch (err) {
       console.error('Failed to fetch dashboard stats:', err)
     } finally {
@@ -151,8 +157,25 @@ export default function DashboardPage() {
     }
   }
 
+  const fetchRecentDatasets = async () => {
+    try {
+      setLoadingDatasets(true)
+      const { data: datasets } = await datasetAPI.list({ limit: 3 })
+      setRecentDatasets(datasets || [])
+    } catch (err) {
+      console.error('Failed to fetch recent datasets:', err)
+    } finally {
+      setLoadingDatasets(false)
+    }
+  }
+
   useEffect(() => {
-    fetchDashboardStats()
+    // Fetch stats and datasets concurrently in parallel
+    Promise.all([
+      fetchDashboardStats(),
+      fetchRecentDatasets()
+    ])
+    
     const timer = setInterval(() => {
       setTimeStr(new Date().toLocaleTimeString())
     }, 1000)
@@ -162,20 +185,44 @@ export default function DashboardPage() {
   if (loading) {
     return (
       <div className="p-6 sm:p-8 space-y-6 max-w-7xl mx-auto bg-[#030712] min-h-screen">
-        <div className="space-y-3">
-          <div className="h-7 w-52 bg-white/[0.02] border border-white/[0.05] rounded-xl animate-pulse" />
-          <div className="h-4 w-72 bg-white/[0.02] border border-white/[0.05] rounded-xl animate-pulse" />
+        {/* Header Skeleton */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-white/[0.04] pb-6">
+          <div className="space-y-3">
+            <div className="h-4 w-32 bg-white/[0.02] border border-white/[0.05] rounded-xl animate-pulse" />
+            <div className="h-8 w-64 bg-white/[0.02] border border-white/[0.05] rounded-xl animate-pulse" />
+            <div className="h-4 w-80 bg-white/[0.02] border border-white/[0.05] rounded-xl animate-pulse" />
+          </div>
+          <div className="h-10 w-44 bg-white/[0.02] border border-white/[0.05] rounded-2xl animate-pulse" />
         </div>
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Actions Skeleton */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {[1, 2, 3, 4].map(n => (
-            <div key={n} className="bg-white/[0.02] border border-white/[0.05] p-5 rounded-2xl animate-pulse space-y-3">
-              <div className="w-10 h-10 rounded-xl bg-white/[0.04]" />
-              <div className="h-7 w-20 bg-white/[0.04] rounded-lg" />
-              <div className="h-4 w-16 bg-white/[0.04] rounded-lg" />
+            <div key={n} className="bg-white/[0.02] border border-white/[0.05] p-4 h-28 rounded-2xl animate-pulse flex flex-col justify-between">
+              <div className="w-9 h-9 rounded-xl bg-white/[0.04]" />
+              <div className="space-y-1.5">
+                <div className="h-3.5 w-24 bg-white/[0.04] rounded-lg" />
+                <div className="h-2.5 w-16 bg-white/[0.04] rounded-lg" />
+              </div>
             </div>
           ))}
         </div>
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* Metric Cards Skeleton */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+          {[1, 2, 3, 4, 5, 6, 7, 8].map(n => (
+            <div key={n} className="bg-white/[0.02] border border-white/[0.05] p-5 h-32 rounded-2xl animate-pulse flex flex-col justify-between">
+              <div className="flex justify-between items-center">
+                <div className="w-9 h-9 rounded-xl bg-white/[0.04]" />
+                <div className="w-10 h-4 bg-white/[0.04] rounded-lg" />
+              </div>
+              <div className="space-y-2">
+                <div className="h-7 w-20 bg-white/[0.04] rounded-lg" />
+                <div className="h-3 w-28 bg-white/[0.04] rounded-lg" />
+              </div>
+            </div>
+          ))}
+        </div>
+        {/* Charts Skeleton */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="bg-white/[0.02] border border-white/[0.05] rounded-2xl p-5 lg:col-span-2 h-72 animate-pulse" />
           <div className="bg-white/[0.02] border border-white/[0.05] rounded-2xl p-5 h-72 animate-pulse" />
         </div>
@@ -413,7 +460,7 @@ export default function DashboardPage() {
             </ResponsiveContainer>
             {/* Centered label */}
             <div className="absolute flex flex-col justify-center items-center">
-              <span className="text-lg font-black text-white">Llama 3</span>
+              <span className="text-lg font-black text-white">{mockModelDist[0]?.model?.split(' ')[0] || 'Llama 3'}</span>
               <span className="text-[9px] font-bold text-gray-500 uppercase">Primary</span>
             </div>
           </div>
@@ -483,7 +530,7 @@ export default function DashboardPage() {
             <div className="space-y-3">
               {[
                 { title: 'Model Optimization Advice', text: 'Prompt cache is active. Recommend fine-tuning Llama-3 with your recent CSV dataset to decrease latency.', color: 'text-purple-400' },
-                { title: 'Database Index Health', text: 'Vector store holds 3 chunks in ChromaDB. Embedding space and index structures match optimally.', color: 'text-cyan-400' },
+                { title: 'Database Index Health', text: 'Vector store holds active embedding spaces. Index structures are aligned optimally.', color: 'text-cyan-400' },
                 { title: 'GPU Capacity Check', text: 'Available GPU storage stands at 38% capacity. Excellent headroom for batch training.', color: 'text-emerald-400' }
               ].map((ins, i) => (
                 <div key={i} className="p-3 bg-white/[0.01] border border-white/[0.04] rounded-xl flex items-start gap-2.5">
@@ -532,27 +579,59 @@ export default function DashboardPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.02]">
-                {[
-                  { name: 'WineQT.csv', type: 'csv', storage: 'GridFS + Cloudinary', status: 'indexed', integrity: '100% Valid' },
-                  { name: 'test_both_original.txt', type: 'txt', storage: 'GridFS + Cloudinary', status: 'indexed', integrity: '100% Valid' },
-                  { name: 'article_level_data.csv', type: 'csv', storage: 'GridFS + Cloudinary', status: 'indexed', integrity: '100% Valid' }
-                ].map((row, i) => (
-                  <tr key={i} className="hover:bg-white/[0.01] transition-colors">
-                    <td className="py-3.5 px-4 font-bold text-gray-200">{row.name}</td>
-                    <td className="py-3.5 px-4">
-                      <span className="px-2 py-0.5 rounded bg-white/[0.04] text-gray-400 font-mono text-[10px] uppercase font-bold">
-                        {row.type}
-                      </span>
+                {loadingDatasets ? (
+                  [1, 2, 3].map(n => (
+                    <tr key={n}>
+                      <td className="py-4 px-4"><div className="h-3.5 w-32 bg-white/[0.03] rounded-lg animate-pulse" /></td>
+                      <td className="py-4 px-4"><div className="h-4 w-12 bg-white/[0.03] rounded-lg animate-pulse" /></td>
+                      <td className="py-4 px-4"><div className="h-3.5 w-28 bg-white/[0.03] rounded-lg animate-pulse" /></td>
+                      <td className="py-4 px-4 text-center"><div className="h-4 w-16 mx-auto bg-white/[0.03] rounded-full animate-pulse" /></td>
+                      <td className="py-4 px-4 text-right"><div className="h-3.5 w-16 ml-auto bg-white/[0.03] rounded-lg animate-pulse" /></td>
+                    </tr>
+                  ))
+                ) : recentDatasets.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="py-8 text-center text-gray-500 font-medium">
+                      No datasets uploaded yet. Click Upload Dataset above to begin.
                     </td>
-                    <td className="py-3.5 px-4 text-gray-400 font-medium">{row.storage}</td>
-                    <td className="py-3.5 px-4 text-center">
-                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                        <span className="w-1 h-1 rounded-full bg-emerald-400 animate-pulse" /> {row.status}
-                      </span>
-                    </td>
-                    <td className="py-3.5 px-4 text-right font-bold text-gray-400">{row.integrity}</td>
                   </tr>
-                ))}
+                ) : (
+                  recentDatasets.map((row, i) => (
+                    <tr 
+                      key={row.id} 
+                      className="hover:bg-white/[0.01] transition-colors cursor-pointer"
+                      onClick={() => navigate(`/datasets/${row.id}`)}
+                    >
+                      <td className="py-3.5 px-4 font-bold text-gray-200">{row.name}</td>
+                      <td className="py-3.5 px-4">
+                        <span className="px-2 py-0.5 rounded bg-white/[0.04] text-gray-400 font-mono text-[10px] uppercase font-bold">
+                          {row.file_type}
+                        </span>
+                      </td>
+                      <td className="py-3.5 px-4 text-gray-400 font-medium">
+                        {row.secure_url ? (row.secure_url.includes('cloudinary') ? 'Cloudinary' : 'AWS S3') : 'GridFS'}
+                      </td>
+                      <td className="py-3.5 px-4 text-center">
+                        <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
+                          row.status === 'ready' || row.status === 'indexed'
+                            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                            : row.status === 'failed'
+                              ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                              : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                        }`}>
+                          <span className={`w-1 h-1 rounded-full ${
+                            row.status === 'ready' || row.status === 'indexed'
+                              ? 'bg-emerald-400 animate-pulse'
+                              : row.status === 'failed'
+                                ? 'bg-rose-400'
+                                : 'bg-amber-400 animate-pulse'
+                          }`} /> {row.status}
+                        </span>
+                      </td>
+                      <td className="py-3.5 px-4 text-right font-bold text-gray-400">100% Valid</td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>

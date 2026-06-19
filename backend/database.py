@@ -120,11 +120,13 @@ async def create_indexes():
         await db.datasets.create_index([("user_id", ASCENDING)])
         await db.datasets.create_index([("created_at", DESCENDING)])
         await db.datasets.create_index([("dataset_id", ASCENDING)])
+        await db.datasets.create_index([("user_id", ASCENDING), ("created_at", DESCENDING)])
     except Exception as e:
         logger.error(f"Failed to create datasets indexes: {e}")
 
     try:
         await db.models.create_index([("user_id", ASCENDING)])
+        await db.models.create_index([("user_id", ASCENDING), ("created_at", DESCENDING)])
     except Exception as e:
         logger.error(f"Failed to create models indexes: {e}")
 
@@ -138,6 +140,7 @@ async def create_indexes():
         await db.messages.create_index([("user_id", ASCENDING)])
         await db.messages.create_index([("conversation_id", ASCENDING)])
         await db.messages.create_index([("created_at", DESCENDING)])
+        await db.messages.create_index([("conversation_id", ASCENDING), ("created_at", ASCENDING)])
         await db.messages.create_index([("user_id", ASCENDING), ("role", ASCENDING), ("created_at", DESCENDING)])
     except Exception as e:
         logger.error(f"Failed to create messages indexes: {e}")
@@ -177,6 +180,7 @@ async def create_indexes():
 
     try:
         await db.conversations.create_index([("user_id", ASCENDING)])
+        await db.conversations.create_index([("user_id", ASCENDING), ("updated_at", DESCENDING)])
     except Exception as e:
         logger.error(f"Failed to create conversations indexes: {e}")
 
@@ -297,11 +301,13 @@ class MockCursor:
     def __init__(self, data, query):
         self._data = [d for d in data if doc_matches_query(d, query)]
         self._sort_key = None
+        self._sort_direction = None
         self._limit_val = None
         self._skip_val = 0
 
     def sort(self, key, direction=None):
         self._sort_key = key
+        self._sort_direction = direction
         return self
 
     def limit(self, n):
@@ -313,7 +319,28 @@ class MockCursor:
         return self
 
     def __aiter__(self):
-        data = self._data[self._skip_val:]
+        from datetime import datetime
+        data = list(self._data)
+        if self._sort_key:
+            key_field = self._sort_key
+            reverse = False
+            if isinstance(self._sort_key, list):
+                key_field = self._sort_key[0][0]
+                reverse = (self._sort_key[0][1] == -1)
+            elif self._sort_direction is not None:
+                reverse = (self._sort_direction == -1)
+            
+            def get_val(x):
+                val = x.get(key_field)
+                if val is None:
+                    return datetime.min if reverse else datetime.max
+                return val
+            try:
+                data = sorted(data, key=get_val, reverse=reverse)
+            except Exception:
+                pass
+        
+        data = data[self._skip_val:]
         if self._limit_val:
             data = data[:self._limit_val]
         return _AsyncIter(data)

@@ -17,6 +17,7 @@ from auth.utils import get_current_user, get_id_query
 from database import get_db
 from config import settings
 from services.dataset_service import download_file_from_gridfs
+from utils.cache import cache_clear_user
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 logger = logging.getLogger(__name__)
@@ -45,12 +46,21 @@ def fmt_msg(m: dict) -> dict:
 
 
 @router.get("/conversations")
-async def list_conversations(current_user=Depends(get_current_user)):
+async def list_conversations(
+    limit: Optional[int] = None,
+    skip: int = 0,
+    current_user=Depends(get_current_user)
+):
     db = get_db()
     convs = []
-    async for c in db.conversations.find({"user_id": str(current_user["_id"])}):
+    cursor = db.conversations.find({"user_id": str(current_user["_id"])}).sort("updated_at", -1)
+    if skip > 0:
+        cursor = cursor.skip(skip)
+    if limit is not None:
+        cursor = cursor.limit(limit)
+    async for c in cursor:
         convs.append(fmt_conv(c))
-    return sorted(convs, key=lambda x: x["updated_at"], reverse=True)
+    return convs
 
 
 @router.post("/conversations")
@@ -67,6 +77,7 @@ async def create_conversation(data: ConversationCreate, current_user=Depends(get
     }
     result = await db.conversations.insert_one(doc)
     doc["_id"] = str(result.inserted_id)
+    await cache_clear_user(str(current_user["_id"]))
     return fmt_conv(doc)
 
 
@@ -78,6 +89,7 @@ async def delete_conversation(conversation_id: str, current_user=Depends(get_cur
         "user_id": str(current_user["_id"])
     })
     await db.messages.delete_many({"conversation_id": conversation_id})
+    await cache_clear_user(str(current_user["_id"]))
     return {"message": "Deleted"}
 
 
@@ -131,6 +143,7 @@ async def send_message(
         {"$set": {"updated_at": datetime.utcnow()}, "$inc": {"message_count": 2}}
     )
 
+    await cache_clear_user(str(current_user["_id"]))
     return {"user": fmt_msg(user_msg), "assistant": fmt_msg(ai_msg)}
 
 
@@ -257,6 +270,9 @@ async def stream_message(
                 {"_id": get_id_query(conversation_id)},
                 {"$set": {"updated_at": datetime.utcnow()}, "$inc": {"message_count": 2}}
             )
+            
+            # Invalidate dashboard telemetry cache on message completion
+            await cache_clear_user(str(current_user["_id"]))
             yield "data: [DONE]\n\n"
         except Exception as e:
             logger.error(f"Error in stream generation: {e}", exc_info=True)

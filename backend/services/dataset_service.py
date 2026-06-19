@@ -861,6 +861,15 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             except Exception as clean_err:
                 logger.error(f"Failed to remove temp file {temp_path}: {clean_err}")
 
+        # Clear cache for the user since status transitions/dataset details updated
+        user_id = dataset_doc.get("user_id")
+        if user_id:
+            try:
+                from utils.cache import cache_clear_user
+                await cache_clear_user(str(user_id))
+            except Exception as cache_err:
+                logger.warning(f"Failed to clear cache in dataset background indexing: {cache_err}")
+
 
 async def auto_generate_api_key_for_dataset(user_id: str, dataset_id: str, dataset_name: str, db):
     """Automatically generate an API key for the user upon completing indexing if none exists."""
