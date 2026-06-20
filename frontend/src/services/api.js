@@ -23,7 +23,7 @@ const validateAndFormatBaseUrl = () => {
   return defaultUrl
 }
 
-const BASE_URL = validateAndFormatBaseUrl()
+export const BASE_URL = validateAndFormatBaseUrl()
 
 const api = axios.create({
   baseURL: BASE_URL,

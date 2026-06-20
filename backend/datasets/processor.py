@@ -296,13 +296,23 @@ def _process_zip(path: str) -> Dict[str, Any]:
             info_list = zip_ref.infolist()
             file_count = len(info_list)
             names = zip_ref.namelist()
+            
+            # Detect if it's an image dataset by checking extensions of files (not directories)
+            non_dir_names = [n for n in names if not n.endswith('/')]
+            image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+            image_files = [n for n in non_dir_names if any(n.lower().endswith(ext) for ext in image_extensions)]
+            is_image_dataset = len(image_files) > 0 and len(image_files) / max(1, len(non_dir_names)) > 0.3
+            
         return {
-            "rows": file_count,
+            "rows": len(image_files) if is_image_dataset else file_count,
             "cols": None,
             "columns": [],
             "metadata": {
                 "file_count": file_count,
-                "filenames": names[:50]
+                "filenames": names[:50],
+                "is_image_dataset": is_image_dataset,
+                "image_count": len(image_files),
+                "type": "image_dataset" if is_image_dataset else "zip"
             }
         }
     except Exception as e:

@@ -141,8 +141,19 @@ async def extract_text_from_file(file_path: str, file_type: str) -> list:
                 raise Exception(f"ZIP Extraction Failure: {zip_err}")
             
             # Walk and parse each supported nested file
+            max_zip_files = int(os.environ.get("MAX_ZIP_FILES", "500"))
+            max_chunks = int(os.environ.get("MAX_DATASET_CHUNKS", "10000"))
+            processed_count = 0
+            
             for root, _, files in os.walk(temp_dir):
                 for file in files:
+                    if len(chunks) >= max_chunks:
+                        logger.warning(f"Reached max dataset chunks limit ({max_chunks}). Stopping ZIP extraction parsing.")
+                        break
+                    if processed_count >= max_zip_files:
+                        logger.warning(f"Reached max ZIP files limit ({max_zip_files}). Stopping ZIP extraction parsing.")
+                        break
+                        
                     inner_path = os.path.join(root, file)
                     inner_ext = file.split(".")[-1].lower()
                     if inner_ext in ("csv", "xlsx", "xls", "pdf", "txt", "docx", "json", "jpg", "jpeg", "png", "webp", "mp3", "wav", "m4a"):
@@ -150,9 +161,14 @@ async def extract_text_from_file(file_path: str, file_type: str) -> list:
                             logger.info(f"Parsing inner zip file: {file}")
                             inner_chunks = await extract_text_from_file(inner_path, inner_ext)
                             for c in inner_chunks:
+                                if len(chunks) >= max_chunks:
+                                    break
                                 chunks.append(f"[File: {file}] {c}")
+                            processed_count += 1
                         except Exception as inner_err:
                             logger.warning(f"Failed parsing file '{file}' inside zip: {inner_err}")
+                if len(chunks) >= max_chunks or processed_count >= max_zip_files:
+                    break
     else:
         raise Exception(f"File type {file_type} not indexable")
     return chunks
@@ -677,6 +693,13 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         except Exception as parse_err:
             raise Exception(f"File Parsing Failure: The file format is corrupt or unsupported. Details: {str(parse_err)}")
         
+        # Intercept and route to image dataset processing pipeline if detected
+        is_image_dataset = meta_res.get("metadata", {}).get("is_image_dataset", False)
+        if is_image_dataset:
+            from services.image_dataset_service import process_image_dataset
+            await process_image_dataset(dataset_doc, temp_path, index_id, meta_res, db)
+            return index_id
+
         await db.rag_indexes.update_one(
             {"_id": index_id},
             {"$set": {"progress": 30.0}}
@@ -688,6 +711,13 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             chunks = await extract_text_from_file(temp_path, file_type)
             if not chunks:
                 raise Exception("No text content could be parsed or extracted from the dataset.")
+            
+            # Enforce max chunk limit as a safeguard
+            max_chunks = int(os.environ.get("MAX_DATASET_CHUNKS", "10000"))
+            if len(chunks) > max_chunks:
+                logger.warning(f"Dataset generated {len(chunks)} chunks, exceeding max limit of {max_chunks}. Truncating.")
+                chunks = chunks[:max_chunks]
+                
             logger.info(f"[OK] Text chunking completed. Generated {len(chunks)} chunks.")
         except Exception as extract_err:
             raise Exception(f"Text Extraction Failure: Failed to split dataset into text chunks. Details: {str(extract_err)}")
@@ -712,7 +742,10 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
                     "created_at": datetime.utcnow()
                 })
             if chunk_docs:
-                await db.dataset_chunks.insert_many(chunk_docs)
+                db_batch_size = 1000
+                for start_idx in range(0, len(chunk_docs), db_batch_size):
+                    batch = chunk_docs[start_idx:start_idx + db_batch_size]
+                    await db.dataset_chunks.insert_many(batch)
                 logger.info(f"Stored {len(chunk_docs)} chunk metadata records in database collection 'dataset_chunks'")
         except Exception as db_chunk_err:
             logger.error(f"Failed to store chunk metadata in database: {db_chunk_err}")

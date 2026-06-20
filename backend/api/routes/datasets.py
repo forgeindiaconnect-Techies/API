@@ -772,3 +772,49 @@ async def get_preview(
                 os.remove(temp_path)
             except Exception as clean_err:
                 logger.error(f"Failed to delete temp file {temp_path}: {clean_err}")
+
+
+@router.get("/{dataset_id}/download")
+async def download_preprocessed_dataset(
+    dataset_id: str,
+    current_user=Depends(get_current_user)
+):
+    d = await fetch_user_dataset_or_raise(dataset_id, current_user)
+    
+    gridfs_id = d.get("gridfs_id")
+    if not gridfs_id:
+        # Fallback to local file if not in gridfs
+        local_path = d.get("preprocessed_zip_path") or d.get("file_path")
+        if local_path and os.path.exists(local_path):
+            from fastapi.responses import FileResponse
+            return FileResponse(
+                local_path,
+                media_type="application/zip",
+                filename=f"preprocessed_{d.get('name', 'dataset.zip')}"
+            )
+        raise HTTPException(status_code=404, detail="Preprocessed ZIP file not found.")
+
+    from fastapi.responses import StreamingResponse
+    from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+    from bson import ObjectId
+    
+    db = get_db()
+    try:
+        fs = AsyncIOMotorGridFSBucket(db._db)
+        grid_in = await fs.open_download_stream(ObjectId(gridfs_id))
+        
+        async def stream_gridfs():
+            while True:
+                chunk = await grid_in.read(256 * 1024) # 256KB chunk
+                if not chunk:
+                    break
+                yield chunk
+                
+        return StreamingResponse(
+            stream_gridfs(),
+            media_type="application/zip",
+            headers={"Content-Disposition": f"attachment; filename=preprocessed_{d.get('name', 'dataset.zip')}"}
+        )
+    except Exception as e:
+        logger.error(f"Failed to stream ZIP from GridFS: {e}")
+        raise HTTPException(status_code=500, detail=f"GridFS read failed: {str(e)}")

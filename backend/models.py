@@ -9,6 +9,10 @@ from enum import Enum
 class DatasetStatus(str, Enum):
     pending = "pending"
     processing = "processing"
+    uploaded = "uploaded"
+    extracted = "extracted"
+    preprocessed = "preprocessed"
+    embedded = "embedded"
     ready = "ready"
     error = "error"
 

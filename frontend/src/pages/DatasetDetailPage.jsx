@@ -6,7 +6,7 @@ import {
   ResponsiveContainer
 } from 'recharts'
 import { Table, FileText, Brain, RefreshCw, Loader, AlertCircle, Sparkles, UploadCloud, Trash2 } from 'lucide-react'
-import { datasetAPI, multimodalAPI } from '../services/api'
+import { datasetAPI, multimodalAPI, BASE_URL } from '../services/api'
 import toast from 'react-hot-toast'
 
 const formatSize = (bytes) => {
@@ -52,12 +52,15 @@ export default function DatasetDetailPage() {
       const dsRes = await datasetAPI.get(id)
       console.log(`[DatasetDetailPage] Dataset details successfully loaded:`, dsRes.data);
       setDataset(dsRes.data)
+      if (dsRes.data.stats) setEda(dsRes.data.stats)
+      if (dsRes.data.preview) setPreview(dsRes.data.preview)
 
       if (dsRes.data.status === 'ready' || dsRes.data.status === 'completed' || dsRes.data.status === 'indexed') {
-        const supportEDA = ['csv', 'xlsx', 'xls', 'txt', 'md', 'pdf', 'docx'].includes(dsRes.data.file_type)
-        const supportPreview = ['csv', 'xlsx', 'xls', 'txt', 'md', 'pdf', 'docx', 'json'].includes(dsRes.data.file_type)
+        const isImageDataset = dsRes.data.stats?.is_image_dataset || dsRes.data.metadata?.is_image_dataset || dsRes.data.preview?.is_image_dataset || dsRes.data.file_type === 'image_zip' || (dsRes.data.metadata?.type === 'image_dataset') || dsRes.data.name?.toLowerCase().endsWith('.zip');
+        const supportEDA = ['csv', 'xlsx', 'xls', 'txt', 'md', 'pdf', 'docx'].includes(dsRes.data.file_type) || isImageDataset
+        const supportPreview = ['csv', 'xlsx', 'xls', 'txt', 'md', 'pdf', 'docx', 'json'].includes(dsRes.data.file_type) || isImageDataset
         
-        console.log(`[DatasetDetailPage] Fetching EDA and Preview for format: ${dsRes.data.file_type}`);
+        console.log(`[DatasetDetailPage] Fetching EDA and Preview. supportEDA: ${supportEDA}, supportPreview: ${supportPreview}`);
         try {
           const promises = []
           if (supportEDA) {
@@ -145,9 +148,9 @@ export default function DatasetDetailPage() {
         }
       }
       
-      // Check total timeout (limit to 3 minutes for larger datasets)
+      // Check total timeout (limit to 5 minutes for larger datasets)
       secondsElapsed += currentInterval / 1000;
-      if (secondsElapsed > 180) {
+      if (secondsElapsed > 300) {
         setPollingError("Processing is taking longer than expected. Please try refreshing the page later.");
         setReprocessing(false);
         return;
@@ -156,7 +159,8 @@ export default function DatasetDetailPage() {
       timeoutId = setTimeout(pollStatus, currentInterval);
     };
 
-    if (dataset && (dataset.status === 'processing' || reprocessing)) {
+    const isProcessing = dataset && (['processing', 'uploaded', 'extracted', 'preprocessed', 'embedded'].includes(dataset.status) || reprocessing);
+    if (isProcessing) {
       setPollingError(null);
       timeoutId = setTimeout(pollStatus, currentInterval);
     }
@@ -290,9 +294,20 @@ Generate a structured response with these EXACT headings:
     )
   }
 
-  if (dataset.status === 'processing' || reprocessing) {
+  const isProcessingState = ['processing', 'uploaded', 'extracted', 'preprocessed', 'embedded'].includes(dataset.status) || reprocessing;
+  if (isProcessingState) {
+    const steps = [
+      { id: 'uploaded', label: 'Uploaded' },
+      { id: 'extracted', label: 'Extracted' },
+      { id: 'preprocessed', label: 'Preprocessed' },
+      { id: 'embedded', label: 'Embedded' },
+      { id: 'ready', label: 'Ready' }
+    ];
+    const currentStepIdx = steps.findIndex(s => s.id === dataset.status);
+    const isImageDataset = dataset.name?.toLowerCase().endsWith('.zip') || dataset.metadata?.is_image_dataset || dataset.metadata?.type === 'image_dataset';
+
     return (
-      <div className="flex flex-col items-center justify-center min-h-[400px] text-center p-6 space-y-4">
+      <div className="flex flex-col items-center justify-center min-h-[400px] text-center p-6 space-y-6">
         {pollingError ? (
           <>
             <AlertCircle size={48} style={{ color: '#ef4444' }} />
@@ -307,13 +322,67 @@ Generate a structured response with these EXACT headings:
           </>
         ) : (
           <>
-            <Loader size={48} className="animate-spin" style={{ color: 'var(--accent-primary)' }} />
+            <div className="relative flex items-center justify-center">
+              <Loader size={56} className="animate-spin absolute" style={{ color: 'var(--accent-primary)', opacity: 0.15 }} />
+              <div className="w-10 h-10 rounded-full flex items-center justify-center bg-violet-600/10 text-violet-500 animate-pulse font-bold text-sm">
+                {currentStepIdx >= 0 ? `${Math.round(((currentStepIdx + 1) / steps.length) * 100)}%` : '...'}
+              </div>
+            </div>
             <div className="space-y-1">
-              <h3 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>Dataset Processing in Progress</h3>
-              <p className="text-sm max-w-sm" style={{ color: 'var(--text-muted)' }}>
-                We are analyzing columns, counting rows, and running calculations. This will take a moment.
+              <h3 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>
+                {isImageDataset ? 'CNN Image Preprocessing Pipeline' : 'Dataset Processing in Progress'}
+              </h3>
+              <p className="text-sm max-w-md mx-auto" style={{ color: 'var(--text-muted)' }}>
+                {isImageDataset 
+                  ? 'Extracting archives, validating images, running CNN pipeline and generating search embeddings.'
+                  : 'We are analyzing columns, counting rows, and running calculations. This will take a moment.'}
               </p>
             </div>
+            
+            {/* Visual Stepper for image datasets */}
+            {isImageDataset && currentStepIdx >= 0 && (
+              <div className="w-full max-w-lg mt-6 p-4 rounded-xl border border-slate-800 bg-slate-950/20 space-y-5">
+                <div className="flex justify-between items-center relative px-2">
+                  <div className="absolute top-1/2 left-0 right-0 h-0.5 bg-slate-800 -translate-y-1/2 z-0" />
+                  <div 
+                    className="absolute top-1/2 left-0 h-0.5 bg-violet-500 -translate-y-1/2 z-0 transition-all duration-500" 
+                    style={{ width: `${(currentStepIdx / (steps.length - 1)) * 90 + 5}%` }}
+                  />
+                  
+                  {steps.map((step, idx) => {
+                    const isCompleted = idx < currentStepIdx;
+                    const isActive = idx === currentStepIdx;
+                    return (
+                      <div key={step.id} className="flex flex-col items-center z-10 relative">
+                        <div 
+                          className={`w-7 h-7 rounded-full flex items-center justify-center font-bold text-xs border transition-all duration-300 ${
+                            isCompleted 
+                              ? 'bg-violet-600 border-violet-600 text-white' 
+                              : isActive 
+                                ? 'bg-slate-900 border-violet-500 text-violet-400 ring-4 ring-violet-500/10' 
+                                : 'bg-slate-950 border-slate-800 text-gray-600'
+                          }`}
+                        >
+                          {isCompleted ? '✓' : idx + 1}
+                        </div>
+                        <span className={`text-[10px] mt-1.5 font-medium transition-colors ${
+                          isActive ? 'text-violet-400 font-semibold' : isCompleted ? 'text-gray-300' : 'text-gray-600'
+                        }`}>
+                          {step.label}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="text-[11px] text-gray-400 bg-slate-900/40 p-2.5 rounded-lg font-mono inline-block">
+                  {dataset.status === 'uploaded' && '⚡ [UPLOADED] Extracting ZIP archive and validating contents...'}
+                  {dataset.status === 'extracted' && '⚡ [EXTRACTED] De-duplicating files and running CNN split preprocessing...'}
+                  {dataset.status === 'preprocessed' && '⚡ [PREPROCESSED] Loading MobileNetV2 and extracting feature embeddings...'}
+                  {dataset.status === 'embedded' && '⚡ [EMBEDDED] Connecting to ChromaDB and compiling EDA stats...'}
+                  {dataset.status === 'processing' && '⚡ Processing dataset index...'}
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>
@@ -374,7 +443,8 @@ Generate a structured response with these EXACT headings:
     )
   }
 
-  const isTabular = ['csv', 'xlsx', 'xls'].includes(dataset.file_type)
+  const isImageDataset = dataset.stats?.is_image_dataset || dataset.metadata?.is_image_dataset || dataset.preview?.is_image_dataset || dataset.file_type === 'image_zip' || (dataset.metadata?.type === 'image_dataset');
+  const isTabular = ['csv', 'xlsx', 'xls'].includes(dataset.file_type) && !isImageDataset
   const isTxt = ['txt', 'md'].includes(dataset.file_type)
   const isDoc = ['docx', 'pdf'].includes(dataset.file_type)
   const isImg = ['jpg', 'jpeg', 'png', 'webp'].includes(dataset.file_type)
@@ -392,7 +462,14 @@ Generate a structured response with these EXACT headings:
   const topKeywords = eda?.top_keywords || []
 
   let stats = []
-  if (isTxt) {
+  if (isImageDataset) {
+    stats = [
+      { label: 'Total Images', value: dataset.stats?.valid_images?.toLocaleString() || dataset.rows?.toLocaleString() || '—', color: '#7c3aed' },
+      { label: 'Classes / Categories', value: dataset.stats?.class_distribution ? Object.keys(dataset.stats.class_distribution).length.toLocaleString() : '—', color: '#06b6d4' },
+      { label: 'Train / Val / Test', value: dataset.stats?.split_counts ? `${dataset.stats.split_counts.train} / ${dataset.stats.split_counts.val} / ${dataset.stats.split_counts.test}` : '—', color: '#f59e0b' },
+      { label: 'File Size', value: formatSize(dataset.size_bytes), color: '#10b981' },
+    ]
+  } else if (isTxt) {
     stats = [
       { label: 'Total Lines', value: dataset.metadata?.lines?.toLocaleString() || dataset.rows?.toLocaleString() || '—', color: '#7c3aed' },
       { label: 'Total Words', value: dataset.metadata?.words?.toLocaleString() || '—', color: '#06b6d4' },
@@ -573,7 +650,54 @@ Generate a structured response with these EXACT headings:
 
       {tab === 'Preview' && (
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-          {!preview || preview.rows?.length === 0 ? (
+          {isImageDataset ? (
+            <div className="card p-5 space-y-4">
+              <div className="flex justify-between items-center">
+                <div>
+                  <h3 className="font-semibold text-sm text-white">Preprocessed CNN Dataset Preview</h3>
+                  <p className="text-xs text-gray-500">Showing first {preview?.images?.length || 0} preprocessed images with class labels</p>
+                </div>
+                {(dataset.preprocessed_zip_path || dataset.gridfs_id) && (
+                  <a
+                    href={`${BASE_URL}/datasets/${id}/download`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="btn-primary text-xs py-1.5 px-3 bg-violet-600 hover:bg-violet-700 text-white flex items-center gap-1.5 rounded-lg font-medium shadow-lg transition-all duration-300"
+                    style={{ background: 'var(--accent-primary)' }}
+                  >
+                    <UploadCloud size={13} className="rotate-180" /> Download Preprocessed ZIP
+                  </a>
+                )}
+              </div>
+              {!preview?.images || preview.images.length === 0 ? (
+                <p className="text-xs text-center py-8 text-gray-500">No previews available</p>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                  {preview.images.map((img, i) => (
+                    <div key={i} className="group relative rounded-xl border border-slate-800 bg-slate-950/40 p-2 hover:border-violet-500/40 transition-all duration-300">
+                      <div className="aspect-square overflow-hidden rounded-lg bg-slate-900 flex items-center justify-center border border-slate-900">
+                        <img 
+                          src={`data:image/jpeg;base64,${img.thumbnail}`} 
+                          alt={img.filename} 
+                          className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105" 
+                        />
+                      </div>
+                      <div className="mt-2.5 px-0.5 space-y-0.5">
+                        <p className="text-[10px] font-semibold text-gray-300 truncate" title={img.filename}>
+                          {img.filename}
+                        </p>
+                        <div className="flex items-center justify-between">
+                          <span className="badge badge-violet text-[8px] font-bold tracking-wide uppercase px-1.5 py-0.5 rounded">
+                            {img.class_name}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : !preview || preview.rows?.length === 0 ? (
             <div className="card p-5 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
               Preview is not available for this file type or is empty.
             </div>
@@ -611,7 +735,135 @@ Generate a structured response with these EXACT headings:
 
       {tab === 'EDA' && (
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-4">
-          {!isTabular && !['txt', 'md', 'pdf', 'docx'].includes(dataset.file_type) ? (
+          {isImageDataset && eda ? (
+            <div className="space-y-4">
+              {/* Image EDA Metrics Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="card p-5 space-y-2">
+                  <p className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>Resolution Summary</p>
+                  <p className="text-2xl font-bold text-violet-400">
+                    {eda.resolution_stats?.mean_width ? `${Math.round(eda.resolution_stats.mean_width)} × ${Math.round(eda.resolution_stats.mean_height)}` : '—'}
+                  </p>
+                  <p className="text-xs" style={{ color: 'var(--text-muted)' }}>Average dimensions (pixels)</p>
+                </div>
+                <div className="card p-5 space-y-2">
+                  <p className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>Dimension Limits</p>
+                  <div className="text-sm font-semibold text-gray-300">
+                    <p>Width: {eda.resolution_stats?.min_width || 0} to {eda.resolution_stats?.max_width || 0} px</p>
+                    <p>Height: {eda.resolution_stats?.min_height || 0} to {eda.resolution_stats?.max_height || 0} px</p>
+                  </div>
+                  <p className="text-xs" style={{ color: 'var(--text-muted)' }}>Min - Max range</p>
+                </div>
+                <div className="card p-5 space-y-2">
+                  <p className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>File Integrity</p>
+                  <p className="text-2xl font-bold text-emerald-400">
+                    {eda.valid_images !== undefined && eda.total_images !== undefined
+                      ? `${Math.round((eda.valid_images / eda.total_images) * 100)}%`
+                      : '100%'}
+                  </p>
+                  <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                    {eda.valid_images || 0} valid / {eda.total_images || 0} total images
+                  </p>
+                </div>
+              </div>
+
+              {/* Class Distribution Chart & Split Breakdown */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="card p-5">
+                  <p className="font-semibold text-sm mb-4" style={{ color: 'var(--text-primary)' }}>
+                    Class Distribution
+                  </p>
+                  {Object.keys(eda.class_distribution || {}).length > 0 ? (
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={Object.entries(eda.class_distribution).map(([name, count]) => ({ name, count }))}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                        <XAxis dataKey="name" tick={{ fontSize: 10, fill: 'var(--text-muted)' }} axisLine={false} />
+                        <YAxis tick={{ fontSize: 10, fill: 'var(--text-muted)' }} axisLine={false} />
+                        <Tooltip />
+                        <Bar dataKey="count" fill="var(--accent-primary)" radius={[3, 3, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <p className="text-xs text-center py-8" style={{ color: 'var(--text-muted)' }}>No class distribution data available</p>
+                  )}
+                </div>
+
+                <div className="card p-5 flex flex-col justify-between">
+                  <div>
+                    <h4 className="font-semibold text-sm mb-4" style={{ color: 'var(--text-primary)' }}>Stratified Split Breakdown</h4>
+                    {eda.split_counts ? (
+                      <div className="space-y-4">
+                        {(() => {
+                          const total = (eda.split_counts.train || 0) + (eda.split_counts.val || 0) + (eda.split_counts.test || 0) || 1;
+                          const trainPct = Math.round((eda.split_counts.train / total) * 100);
+                          const valPct = Math.round((eda.split_counts.val / total) * 100);
+                          const testPct = Math.round((eda.split_counts.test / total) * 100);
+                          return (
+                            <>
+                              <div className="h-4 rounded-full overflow-hidden flex bg-slate-900 border border-slate-800">
+                                <div style={{ width: `${trainPct}%`, backgroundColor: 'var(--accent-primary)' }} title={`Train: ${trainPct}%`} className="h-full transition-all" />
+                                <div style={{ width: `${valPct}%`, backgroundColor: '#06b6d4' }} title={`Val: ${valPct}%`} className="h-full transition-all" />
+                                <div style={{ width: `${testPct}%`, backgroundColor: '#f59e0b' }} title={`Test: ${testPct}%`} className="h-full transition-all" />
+                              </div>
+                              <div className="grid grid-cols-3 gap-2 text-xs">
+                                <div className="flex flex-col p-2.5 rounded-lg bg-slate-900/40 border border-slate-800">
+                                  <div className="flex items-center gap-1.5 font-medium text-gray-300">
+                                    <div className="w-2 h-2 rounded-full" style={{ backgroundColor: 'var(--accent-primary)' }} />
+                                    Train (70%)
+                                  </div>
+                                  <p className="text-sm font-bold mt-1 text-white">{eda.split_counts.train} <span className="text-[9px] text-gray-500 font-normal">({trainPct}%)</span></p>
+                                </div>
+                                <div className="flex flex-col p-2.5 rounded-lg bg-slate-900/40 border border-slate-800">
+                                  <div className="flex items-center gap-1.5 font-medium text-gray-300">
+                                    <div className="w-2 h-2 rounded-full bg-cyan-500" />
+                                    Val (15%)
+                                  </div>
+                                  <p className="text-sm font-bold mt-1 text-white">{eda.split_counts.val} <span className="text-[9px] text-gray-500 font-normal">({valPct}%)</span></p>
+                                </div>
+                                <div className="flex flex-col p-2.5 rounded-lg bg-slate-900/40 border border-slate-800">
+                                  <div className="flex items-center gap-1.5 font-medium text-gray-300">
+                                    <div className="w-2 h-2 rounded-full bg-amber-500" />
+                                    Test (15%)
+                                  </div>
+                                  <p className="text-sm font-bold mt-1 text-white">{eda.split_counts.test} <span className="text-[9px] text-gray-500 font-normal">({testPct}%)</span></p>
+                                </div>
+                              </div>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-center py-8" style={{ color: 'var(--text-muted)' }}>No split count information available</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Integrity & Corruption Report */}
+              {eda.missing_or_corrupt_report && eda.missing_or_corrupt_report.length > 0 ? (
+                <div className="card p-4 border border-amber-950 bg-amber-950/10 space-y-2">
+                  <div className="flex items-center gap-2 text-amber-400">
+                    <AlertCircle size={16} />
+                    <p className="text-sm font-semibold">Corrupted / Skipped Files Report ({eda.missing_or_corrupt_report.length})</p>
+                  </div>
+                  <p className="text-[11px] text-amber-500/80">These files were invalid, corrupted, or not recognized as valid images and were discarded from the training pipeline:</p>
+                  <div className="max-h-36 overflow-y-auto font-mono text-[10px] text-gray-400 bg-slate-950/50 p-2.5 rounded-lg border border-slate-800 space-y-1">
+                    {eda.missing_or_corrupt_report.map((item, idx) => (
+                      <div key={idx} className="truncate border-b border-slate-900 pb-1 last:border-0 last:pb-0">{item}</div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="card p-4 flex items-center gap-3 border border-emerald-950 bg-emerald-950/10 text-emerald-400">
+                  <AlertCircle size={18} className="text-emerald-500 shrink-0" />
+                  <div className="text-xs">
+                    <p className="font-semibold">All Files Validated Successfully</p>
+                    <p className="text-emerald-500/80 mt-0.5">No corrupted images, unrecognized formats, or missing attributes were encountered.</p>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : !isTabular && !['txt', 'md', 'pdf', 'docx'].includes(dataset.file_type) ? (
             <div className="card p-5 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
               EDA charts are only supported for document datasets (TXT, PDF, DOCX) and tabular CSV/Excel files.
             </div>
