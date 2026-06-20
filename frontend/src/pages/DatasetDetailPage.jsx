@@ -159,7 +159,7 @@ export default function DatasetDetailPage() {
       timeoutId = setTimeout(pollStatus, currentInterval);
     };
 
-    const isProcessing = dataset && (['processing', 'uploaded', 'extracted', 'preprocessed', 'embedded'].includes(dataset.status) || reprocessing);
+    const isProcessing = dataset && (['processing', 'uploaded', 'extracted', 'preprocessed', 'embedding', 'embedded'].includes(dataset.status) || reprocessing);
     if (isProcessing) {
       setPollingError(null);
       timeoutId = setTimeout(pollStatus, currentInterval);
@@ -294,12 +294,13 @@ Generate a structured response with these EXACT headings:
     )
   }
 
-  const isProcessingState = ['processing', 'uploaded', 'extracted', 'preprocessed', 'embedded'].includes(dataset.status) || reprocessing;
+  const isProcessingState = ['processing', 'uploaded', 'extracted', 'preprocessed', 'embedding', 'embedded'].includes(dataset.status) || reprocessing;
   if (isProcessingState) {
     const steps = [
       { id: 'uploaded', label: 'Uploaded' },
       { id: 'extracted', label: 'Extracted' },
       { id: 'preprocessed', label: 'Preprocessed' },
+      { id: 'embedding', label: 'Embedding' },
       { id: 'embedded', label: 'Embedded' },
       { id: 'ready', label: 'Ready' }
     ];
@@ -377,16 +378,40 @@ Generate a structured response with these EXACT headings:
                 <div className="text-[11px] text-gray-400 bg-slate-900/40 p-2.5 rounded-lg font-mono inline-block">
                   {dataset.status === 'uploaded' && '⚡ [UPLOADED] Extracting ZIP archive and validating contents...'}
                   {dataset.status === 'extracted' && '⚡ [EXTRACTED] De-duplicating files and running CNN split preprocessing...'}
-                  {dataset.status === 'preprocessed' && '⚡ [PREPROCESSED] Loading MobileNetV2 and extracting feature embeddings...'}
+                  {dataset.status === 'preprocessed' && '⚡ [PREPROCESSED] Initializing MobileNetV2 model...'}
+                  {dataset.status === 'embedding' && `⚡ [EMBEDDING] Generating embeddings: Batch ${dataset.embedding_progress?.current_batch || 0}/${dataset.embedding_progress?.total_batches || 0}`}
                   {dataset.status === 'embedded' && '⚡ [EMBEDDED] Connecting to ChromaDB and compiling EDA stats...'}
                   {dataset.status === 'processing' && '⚡ Processing dataset index...'}
                 </div>
+
+                {/* Real-time embedding progress details */}
+                {dataset.status === 'embedding' && dataset.embedding_progress && (
+                  <div className="pt-3 border-t border-slate-850 space-y-3 text-left">
+                    <div className="flex justify-between text-xs font-semibold">
+                      <span className="text-gray-400">Embedding Progress</span>
+                      <span className="text-violet-400">
+                        {Math.round(((dataset.embedding_progress.processed_images || 0) / (dataset.embedding_progress.total_images || 1)) * 100)}%
+                      </span>
+                    </div>
+                    <div className="w-full h-1.5 rounded-full bg-slate-900 border border-slate-850 overflow-hidden">
+                      <div 
+                        className="h-full bg-violet-500 transition-all duration-300"
+                        style={{ width: `${((dataset.embedding_progress.processed_images || 0) / (dataset.embedding_progress.total_images || 1)) * 100}%` }}
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-y-1.5 text-[10px] font-mono text-gray-500">
+                      <div>Processed Images: <span className="text-gray-300 font-semibold">{dataset.embedding_progress.processed_images || 0} / {dataset.embedding_progress.total_images || 0}</span></div>
+                      <div className="text-right">Current Batch: <span className="text-gray-300 font-semibold">{dataset.embedding_progress.current_batch || 0} / {dataset.embedding_progress.total_batches || 0}</span></div>
+                      <div className="col-span-2">Est. Time Remaining: <span className="text-violet-400 font-semibold">{dataset.embedding_progress.estimated_remaining_seconds ? `${Math.round(dataset.embedding_progress.estimated_remaining_seconds)}s` : 'calculating...'}</span></div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </>
         )}
       </div>
-    )
+    );
   }
 
   if (dataset.status === 'error' || dataset.status === 'failed') {

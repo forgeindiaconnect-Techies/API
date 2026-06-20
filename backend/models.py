@@ -12,6 +12,7 @@ class DatasetStatus(str, Enum):
     uploaded = "uploaded"
     extracted = "extracted"
     preprocessed = "preprocessed"
+    embedding = "embedding"
     embedded = "embedded"
     ready = "ready"
     error = "error"

@@ -2,10 +2,14 @@ import os
 import sys
 import asyncio
 import zipfile
-import shutil
 import io
-from PIL import Image
+import logging
 from datetime import datetime
+from PIL import Image
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Add backend to path so we can import things
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'backend')))
@@ -15,10 +19,7 @@ from bson import ObjectId
 
 def create_mock_images_zip(zip_path: str):
     """Create a mock image dataset zip with valid, duplicate, and corrupt files"""
-    # Create simple solid color PIL images to save
     os.makedirs(os.path.dirname(zip_path), exist_ok=True)
-    
-    # Store first image bytes to create a duplicate
     first_img_bytes = None
     
     with zipfile.ZipFile(zip_path, 'w') as z:
@@ -40,7 +41,6 @@ def create_mock_images_zip(zip_path: str):
             for filename, size, color in files:
                 img = Image.new("RGB", size, color)
                 buf = io.BytesIO()
-                # Determine format from extension
                 fmt = "JPEG" if filename.endswith(".jpg") else "PNG" if filename.endswith(".png") else "WEBP"
                 img.save(buf, format=fmt)
                 img_data = buf.getvalue()
@@ -48,13 +48,12 @@ def create_mock_images_zip(zip_path: str):
                 if first_img_bytes is None:
                     first_img_bytes = img_data
                 
-                # Write to zip in class folder
                 z.writestr(f"{class_name}/{filename}", img_data)
                 
-        # 1. Write Duplicate File (same bytes as cat1.jpg but different name)
+        # 1. Write Duplicate File
         z.writestr("cats/duplicate.jpg", first_img_bytes)
         
-        # 2. Write Corrupt File (not a valid image format)
+        # 2. Write Corrupt File
         z.writestr("dogs/corrupt.png", b"This is not a valid PNG image. Just some random corrupt text bytes.")
         
     print(f"Created mock image dataset ZIP at {zip_path}")
@@ -71,7 +70,35 @@ async def run_pipeline():
     dataset_id = ObjectId()
     index_id = ObjectId()
     
-    print(f"Creating mock dataset document with ID: {dataset_id}")
+    # Define filenames that we will simulate as already processed for the resume test
+    simulated_processed_files = ["cat1.jpg", "cat2.jpg", "cat3.jpg", "cat4.jpg", "dog1.png"]
+    
+    print(f"Simulating Resume/Recovery scenario: Inserting 5 pre-processed chunks in MongoDB...")
+    for idx, fname in enumerate(simulated_processed_files):
+        chunk_id = f"{index_id}_{idx}"
+        chunk_doc = {
+            "dataset_id": str(dataset_id),
+            "index_id": str(index_id),
+            "chunk_id": chunk_id,
+            "source_file": fname,
+            "chunk_text": f"[Class: cats] [Split: train] {fname}",
+            "thumbnail": "iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCA...", # Dummy base64 thumbnail
+            "metadata": {"class": "cats", "split": "train"},
+            "created_at": datetime.utcnow()
+        }
+        await db.dataset_chunks.insert_one(chunk_doc)
+        
+    # Initialize ChromaDB store for resume simulation (we must have at least those 5 documents)
+    from vector_db.store import VectorStore
+    store = VectorStore(backend="chroma", collection_name=str(index_id))
+    await store.ensure_initialized()
+    
+    vector_docs = [f"[Class: cats] [Split: train] {f}" for f in simulated_processed_files]
+    vector_embeds = [[0.0] * 1280 for _ in range(5)]
+    vector_metadatas = [{"dataset_id": str(dataset_id), "filename": f, "class": "cats", "split": "train", "is_image": True} for f in simulated_processed_files]
+    vector_ids = [f"{index_id}_{i}" for i in range(5)]
+    await store.add_documents(vector_docs, vector_embeds, vector_metadatas, vector_ids)
+    
     dataset_doc = {
         "_id": dataset_id,
         "name": "mock_image_dataset.zip",
@@ -80,7 +107,7 @@ async def run_pipeline():
         "size_bytes": os.path.getsize(zip_path),
         "status": "processing",
         "created_at": datetime.utcnow(),
-        "user_id": ObjectId() # Dummy user ID
+        "user_id": ObjectId()
     }
     await db.datasets.insert_one(dataset_doc)
     
@@ -99,7 +126,6 @@ async def run_pipeline():
         
         # Run the pipeline
         print("Invoking process_image_dataset...")
-        # Make a mock meta_res dictionary
         meta_res = {
             "metadata": {
                 "is_image_dataset": True,
@@ -112,7 +138,7 @@ async def run_pipeline():
         updated_dataset = await db.datasets.find_one({"_id": dataset_id})
         updated_index = await db.rag_indexes.find_one({"_id": index_id})
         
-        print("\n--- Pipeline Verification Results ---")
+        print("\n--- Resume/Recovery Verification Results ---")
         print(f"Dataset status: {updated_dataset.get('status')}")
         print(f"Index status: {updated_index.get('status')}")
         
@@ -120,30 +146,35 @@ async def run_pipeline():
         print(f"Stats present: {bool(stats)}")
         if stats:
             print(f"  Valid images: {stats.get('valid_images')}")
-            print(f"  Total images (valid + corrupt): {stats.get('total_images')}")
+            print(f"  Total images: {stats.get('total_images')}")
             print(f"  Class distribution: {stats.get('class_distribution')}")
             print(f"  Split counts: {stats.get('split_counts')}")
-            print(f"  Resolution stats: {stats.get('resolution_stats')}")
-            print(f"  Corruption report: {stats.get('missing_or_corrupt_report')}")
-            
-        preview = updated_dataset.get("preview", {})
-        print(f"Preview present: {bool(preview)}")
-        if preview:
-            print(f"  Preview images count: {len(preview.get('images', []))}")
+            print(f"  Checkpoint stats: {stats.get('checkpoint')}")
             
         print(f"Chunk count in dataset: {updated_dataset.get('chunk_count')}")
-        print(f"GridFS ZIP reference: {updated_dataset.get('gridfs_id')}")
-        print(f"Preprocessed local ZIP: {updated_dataset.get('preprocessed_zip_path')}")
+        print(f"Embedding count in dataset: {updated_dataset.get('embedding_count')}")
         
-        # Check ChromaDB / mongodb chunks count
+        # Verify MongoDB chunks
         chunks_in_db = await db.dataset_chunks.count_documents({"dataset_id": str(dataset_id)})
-        print(f"Number of chunks stored in MongoDB dataset_chunks: {chunks_in_db}")
+        print(f"Chunks in MongoDB: {chunks_in_db}")
+        
+        # Verify ChromaDB vectors count
+        chroma_count = await store.count()
+        print(f"Vectors count in ChromaDB: {chroma_count}")
+        
+        # Verify if ChromaDB has exactly 10 vectors (5 pre-inserted + 5 generated in resume)
+        assert chunks_in_db == 10, f"Expected 10 chunks, got {chunks_in_db}"
+        assert chroma_count == 10, f"Expected 10 vectors in ChromaDB, got {chroma_count}"
+        assert updated_dataset.get("status") == "ready", "Dataset status should be READY"
+        assert updated_index.get("status") == "ready", "Index status should be READY"
+        print("\n[SUCCESS] Pipeline resumed successfully, processed only missing items, and validated counts!")
         
         # Clean up database records
         print("\nCleaning up database records...")
         await db.datasets.delete_one({"_id": dataset_id})
         await db.rag_indexes.delete_one({"_id": index_id})
         await db.dataset_chunks.delete_many({"dataset_id": str(dataset_id)})
+        await store.delete_store()
         print("Database cleanup completed.")
         
     except Exception as e:
@@ -155,8 +186,8 @@ async def run_pipeline():
         if os.path.exists(zip_path):
             os.remove(zip_path)
             print(f"Removed mock ZIP at {zip_path}")
-        if 'preprocessed_zip_path' in locals() or 'updated_dataset' in locals():
-            p_zip = updated_dataset.get("preprocessed_zip_path") if 'updated_dataset' in locals() else None
+        if 'updated_dataset' in locals() and updated_dataset:
+            p_zip = updated_dataset.get("preprocessed_zip_path")
             if p_zip and os.path.exists(p_zip):
                 try:
                     os.remove(p_zip)
