@@ -43,24 +43,21 @@ def fmt_key(k: dict, mask: bool = True, raw_key: str = None) -> dict:
             pass
 
     key_value = None
-    if not mask:
-        key_value = raw_key or k.get("key")
+    if not mask and raw_key:
+        # Only show full key when explicitly provided (creation/rotation one-time display)
+        key_value = raw_key
     else:
-        full_key = raw_key or k.get("key") or ""
-        if full_key:
-            key_value = full_key[:12] + "••••••••"
+        prefix = k.get("key_prefix") or ""
+        if prefix:
+            key_value = prefix + "••••••••"
         else:
-            prefix = k.get("key_prefix")
-            if prefix:
-                key_value = prefix + "••••••••"
-            else:
-                key_value = "••••••••••••"
+            key_value = "sk-ai_••••••••"
 
     return {
         "id": str(k["_id"]),
         "name": k.get("name"),
         "key": key_value,
-        "key_prefix": k.get("key_prefix") or (raw_key[:12] if raw_key else (k.get("key")[:12] if k.get("key") else None)),
+        "key_prefix": k.get("key_prefix") or (raw_key[:12] if raw_key else None),
         "scopes": k.get("scopes", ["chat"]),
         "rate_limit": k.get("rate_limit", 10000),
         "request_count": k.get("request_count") or k.get("requests_count") or 0,
@@ -92,8 +89,8 @@ async def create_api_key(data: ApiKeyCreate, current_user=Depends(get_current_us
 
     doc = {
         "name": data.name,
-        "key": raw_key,
         "key_hash": key_hash,
+        "key_prefix": raw_key[:12],
         "scopes": data.scopes,
         "rate_limit": data.rate_limit if data.rate_limit is not None else 10000,
         "request_count": 0,
@@ -174,11 +171,12 @@ async def rotate_api_key(key_id: str, current_user=Depends(get_current_user)):
     await db.api_keys.update_one(
         query,
         {"$set": {
-            "key": raw_key,
             "key_hash": key_hash,
+            "key_prefix": raw_key[:12],
             "request_count": 0,
             "created_at": datetime.utcnow(),
-        }}
+        }, "$unset": {"key": ""}}
+
     )
     
     updated_k = await db.api_keys.find_one(query)

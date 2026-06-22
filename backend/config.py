@@ -68,6 +68,12 @@ class Settings(BaseSettings):
     )
     TESSERACT_PATH: str = ""
 
+    # External API toggle — when False, disables Gemini/OpenAI fallbacks in chat and embedding pipelines
+    USE_EXTERNAL_APIS: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("USE_EXTERNAL_APIS", "ENABLE_EXTERNAL_APIS")
+    )
+
     # Storage
     UPLOAD_DIR: str = "./uploads"
     MAX_UPLOAD_SIZE_MB: int = 1000
@@ -80,7 +86,10 @@ class Settings(BaseSettings):
     # AWS S3
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""
-    AWS_REGION_NAME: str = "us-east-1"
+    AWS_REGION_NAME: str = Field(
+        default="us-east-1",
+        validation_alias=AliasChoices("AWS_REGION", "AWS_REGION_NAME")
+    )
     AWS_S3_BUCKET: str = ""
 
     # ChromaDB

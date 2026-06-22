@@ -96,7 +96,7 @@ async def query_dataset_rag(index_id: str, question: str, top_k: int = 5, db = N
 
     # 2. Get active embedder model (tiered fallback)
     try:
-        embedder = await get_embedding_model_async(index.get("embedding_model", "paraphrase-MiniLM-L3-v2"))
+        embedder = await get_embedding_model_async(index.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2"))
     except Exception as e:
         logger.error(f"Failed to load embedding model: {e}")
         return {"answer": "Embedding generation failed.", "sources": []}
@@ -215,8 +215,8 @@ Generate a natural language response."""
     else:
         logger.info("Ollama is cached offline. Skipping connection attempt and trying fallbacks immediately.")
         
-    # B: Try Google Gemini fallback if Ollama is unavailable
-    if not llm_connected:
+    # B: Try Google Gemini fallback if Ollama is unavailable (only when external APIs are enabled)
+    if not llm_connected and settings.USE_EXTERNAL_APIS:
         import os
         gemini_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY")
         if gemini_key and not gemini_key.startswith("your-"):
@@ -244,9 +244,11 @@ Generate a natural language response."""
                 logger.info(f"LLM response status: Failed (Gemini error: {gemini_err})")
         else:
             logger.info("LLM response status: GEMINI_API_KEY is missing or placeholder. Skipping Gemini fallback.")
+    elif not llm_connected and not settings.USE_EXTERNAL_APIS:
+        logger.info("LLM response status: Gemini fallback skipped (USE_EXTERNAL_APIS=false).")
 
-    # C: Try OpenAI fallback if Gemini is unavailable or fails
-    if not llm_connected:
+    # C: Try OpenAI fallback if Gemini is unavailable or fails (only when external APIs are enabled)
+    if not llm_connected and settings.USE_EXTERNAL_APIS:
         import os
         openai_key = settings.OPENAI_API_KEY or os.environ.get("OPENAI_API_KEY")
         if openai_key and not openai_key.startswith("sk-..."):
@@ -267,6 +269,8 @@ Generate a natural language response."""
                 logger.info(f"LLM response status: Failed (OpenAI error: {openai_err})")
         else:
             logger.info("LLM response status: OpenAI API key is missing or invalid. Skipping OpenAI fallback.")
+    elif not llm_connected and not settings.USE_EXTERNAL_APIS:
+        logger.info("LLM response status: OpenAI fallback skipped (USE_EXTERNAL_APIS=false).")
 
     # D: If all are unavailable, fall back to Dataset-Only RAG Mode with natural language responder
     if not llm_connected:

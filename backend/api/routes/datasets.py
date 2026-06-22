@@ -158,7 +158,7 @@ async def upload_dataset(
     os.makedirs(user_upload_dir, exist_ok=True)
     local_path = os.path.join(user_upload_dir, f"{unique_id}.{ext}")
     
-    md5_hash = hashlib.md5()
+    sha256_hash = hashlib.sha256()
     file_size = 0
     chunk_size = 1024 * 1024  # 1MB chunk size
     
@@ -180,7 +180,7 @@ async def upload_dataset(
                         detail=f"File exceeds maximum upload size of {settings.MAX_UPLOAD_SIZE_MB}MB."
                     )
                 f.write(chunk)
-                md5_hash.update(chunk)
+                sha256_hash.update(chunk)
                 
         # Validate file existence on disk and size match
         if not os.path.exists(local_path) or not os.path.isfile(local_path) or os.path.getsize(local_path) != file_size:
@@ -198,7 +198,7 @@ async def upload_dataset(
                 pass
         raise HTTPException(status_code=500, detail=f"Failed to store file on server: {str(e)}")
 
-    file_hash = md5_hash.hexdigest()
+    file_hash = sha256_hash.hexdigest()
     user_id_str = str(current_user["_id"])
     
     # 2. Check for duplicate upload
@@ -250,107 +250,93 @@ async def upload_dataset(
                 pass
         raise HTTPException(status_code=500, detail="Database insertion failed")
 
-    # 4. Immediately upload file to cloud storage BEFORE returning response.
-    #    This guarantees the file survives a server restart between upload and indexing.
-    #    All three backends run in parallel to minimize upload latency.
-    backup_update = {}
-    
-    # Only attempt backup if file fits within our safe in-memory limit
-    backup_max_mb = int(os.environ.get("BACKUP_MAX_SIZE_MB", "200"))
-    file_size_mb = file_size / (1024 * 1024)
-    
-    if file_size_mb <= backup_max_mb:
+    # 4. Immediately upload file to AWS S3 BEFORE returning response.
+    #    This guarantees the file survives a server restart.
+    try:
+        # Read the freshly saved local file once for S3 upload
+        with open(local_path, "rb") as fh:
+            file_bytes = fh.read()
+
+        content_type_map = {
+            "txt": "text/plain", "csv": "text/csv", "pdf": "application/pdf",
+            "json": "application/json", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "zip": "application/zip", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+            "png": "image/png", "webp": "image/webp", "mp3": "audio/mpeg", "wav": "audio/wav",
+        }
+        content_type = content_type_map.get(ext, "application/octet-stream")
+
+        # --- S3 upload (Mandatory) ---
+        from services.s3_service import upload_file_to_s3
+        import time
+        timestamp = int(time.time())
+        
+        logger.info(f"Upload: Staging file for S3 upload: {file.filename}")
+        s3_res = await upload_file_to_s3(file_bytes, file.filename, doc["_id"], content_type, timestamp)
+        
+        if not s3_res.get("s3_key"):
+            raise Exception("S3 upload failed: s3_key is empty.")
+            
+        s3_key = s3_res["s3_key"]
+        s3_url = s3_res.get("s3_url")
+        logger.info(f"Upload: AWS S3 upload succeeded: key={s3_key}")
+        
+        # --- Cloudinary upload (Optional Backup) ---
+        cloudinary_url = None
+        public_id = None
+        if settings.CLOUDINARY_CLOUD_NAME and settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET:
+            try:
+                from services.cloudinary_service import upload_file_to_cloudinary
+                cl_res = await upload_file_to_cloudinary(file_bytes, file.filename)
+                cloudinary_url = cl_res.get("secure_url") or cl_res.get("url")
+                public_id = cl_res.get("public_id")
+            except Exception as cl_err:
+                logger.warning(f"Upload: Cloudinary backup failed: {cl_err}")
+
+        # 4.5 Save S3 info and required camelCase + snake_case metadata to MongoDB dataset document
+        update_data = {
+            "s3_key": s3_key,
+            "s3_url": s3_url,
+            "secure_url": s3_url if not cloudinary_url else cloudinary_url,
+            "cloudinary_url": cloudinary_url,
+            "public_id": public_id,
+            # Required camelCase fields:
+            "fileName": file.filename,
+            "s3Key": s3_key,
+            "s3Url": s3_url,
+            "mimeType": content_type,
+            "size": file_size,
+            "userId": user_id_str,
+            "datasetId": doc["_id"],
+            "uploadedAt": datetime.utcnow()
+        }
+        
+        await db.datasets.update_one(
+            {"_id": result.inserted_id},
+            {"$set": update_data}
+        )
+        doc.update(update_data)
+        logger.info(f"Upload: S3 metadata successfully saved to MongoDB for dataset {doc['_id']}")
+        
+    except Exception as upload_err:
+        logger.error(f"Upload: AWS S3 upload failed for dataset {doc['_id']}: {upload_err}", exc_info=True)
+        # Cleanup local file on failure
+        if os.path.exists(local_path):
+            try:
+                os.remove(local_path)
+            except Exception:
+                pass
+        # Delete dataset doc if upload failed to avoid orphan/broken datasets
         try:
-            # Read the freshly saved local file once for all upload tasks
-            with open(local_path, "rb") as fh:
-                file_bytes = fh.read()
-
-            content_type_map = {
-                "txt": "text/plain", "csv": "text/csv", "pdf": "application/pdf",
-                "json": "application/json", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "zip": "application/zip", "jpg": "image/jpeg", "jpeg": "image/jpeg",
-                "png": "image/png", "webp": "image/webp", "mp3": "audio/mpeg", "wav": "audio/wav",
-            }
-            content_type = content_type_map.get(ext, "application/octet-stream")
-
-            # --- GridFS upload ---
-            async def _upload_gridfs():
-                try:
-                    from services.dataset_service import upload_file_to_gridfs
-                    gfs_id = await upload_file_to_gridfs(file_bytes, file.filename, content_type)
-                    if gfs_id:
-                        logger.info(f"Upload: GridFS backup succeeded for dataset {doc['_id']}: gridfs_id={gfs_id}")
-                        return {"gridfs_id": gfs_id}
-                except Exception as e:
-                    logger.error(f"Upload: GridFS backup failed for dataset {doc['_id']}: {e}")
-                return {}
-
-            # --- Cloudinary upload ---
-            async def _upload_cloudinary():
-                if not (settings.CLOUDINARY_CLOUD_NAME and settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET):
-                    logger.warning(f"Upload: Cloudinary not configured, skipping.")
-                    return {}
-                try:
-                    from services.cloudinary_service import upload_file_to_cloudinary
-                    res = await upload_file_to_cloudinary(file_bytes, file.filename)
-                    sec_url = res.get("secure_url") or res.get("url")
-                    pub_id = res.get("public_id")
-                    if sec_url:
-                        logger.info(f"Upload: Cloudinary backup succeeded for dataset {doc['_id']}: {sec_url}")
-                        return {"cloudinary_url": sec_url, "secure_url": sec_url, "public_id": pub_id}
-                except Exception as e:
-                    logger.error(f"Upload: Cloudinary backup failed for dataset {doc['_id']}: {e}")
-                return {}
-
-            # --- S3 upload ---
-            async def _upload_s3():
-                if not (settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY and settings.AWS_S3_BUCKET):
-                    logger.warning(f"Upload: AWS S3 not configured, skipping.")
-                    return {}
-                try:
-                    from services.s3_service import upload_file_to_s3
-                    res = await upload_file_to_s3(file_bytes, file.filename, content_type)
-                    if res.get("s3_key"):
-                        logger.info(f"Upload: AWS S3 backup succeeded for dataset {doc['_id']}: key={res['s3_key']}")
-                        return {"s3_key": res["s3_key"], "s3_url": res.get("s3_url")}
-                except Exception as e:
-                    logger.error(f"Upload: AWS S3 backup failed for dataset {doc['_id']}: {e}")
-                return {}
-
-            logger.info(f"Upload: Starting parallel cloud backups for dataset {doc['_id']} ({file_size_mb:.1f}MB)...")
-            results = await asyncio.gather(_upload_gridfs(), _upload_cloudinary(), _upload_s3())
-
-            for r in results:
-                backup_update.update(r)
-
-            # Set secure_url from S3 if Cloudinary didn't provide one
-            if not backup_update.get("secure_url") and backup_update.get("s3_url"):
-                backup_update["secure_url"] = backup_update["s3_url"]
-
-            if backup_update:
-                await db.datasets.update_one(
-                    {"_id": result.inserted_id},
-                    {"$set": backup_update}
-                )
-                doc.update(backup_update)
-                logger.info(f"Upload: Cloud backup fields saved to MongoDB for dataset {doc['_id']}: {list(backup_update.keys())}")
-            else:
-                logger.warning(
-                    f"Upload: ALL cloud backup attempts failed for dataset {doc['_id']}. "
-                    f"File is on local disk only ({local_path}). "
-                    f"IMPORTANT: If the server restarts before indexing completes, this file will be PERMANENTLY LOST. "
-                    f"Ensure Cloudinary/S3/GridFS credentials are correctly configured in Render environment."
-                )
-        except Exception as backup_err:
-            logger.error(f"Upload: Cloud backup process raised an unexpected error for dataset {doc['_id']}: {backup_err}", exc_info=True)
-    else:
-        logger.warning(
-            f"Upload: File {file.filename} ({file_size_mb:.1f}MB) exceeds BACKUP_MAX_SIZE_MB={backup_max_mb}MB. "
-            f"Skipping in-memory cloud backup. File stored on local disk only."
+            await db.datasets.delete_one({"_id": result.inserted_id})
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"AWS S3 upload failed: {str(upload_err)}. Verify AWS credentials and S3_BUCKET."
         )
 
-    # 5. Add background task for RAG indexing (now safe: cloud backup already done above)
+    # 5. Add background task for RAG indexing
     from services.dataset_service import build_index_for_dataset
     background_tasks.add_task(build_index_for_dataset, doc, db)
 
@@ -424,16 +410,7 @@ async def delete_dataset(dataset_id: str, current_user=Depends(get_current_user)
         except Exception as e:
             logger.error(f"Failed to delete Cloudinary file {public_id}: {e}")
 
-    # 3.5 Delete from GridFS
-    gridfs_id = d.get("gridfs_id")
-    if gridfs_id:
-        try:
-            from motor.motor_asyncio import AsyncIOMotorGridFSBucket
-            fs = AsyncIOMotorGridFSBucket(db._db)
-            await fs.delete(ObjectId(gridfs_id))
-            logger.info(f"Deleted GridFS file {gridfs_id} for dataset {dataset_id}")
-        except Exception as e:
-            logger.error(f"Failed to delete GridFS file {gridfs_id}: {e}")
+    # 3.5 (GridFS cleanup — no longer used for new uploads, skip deletion)
 
     # 3.6 Delete from AWS S3
     s3_key = d.get("s3_key")
@@ -694,7 +671,7 @@ async def get_dataset_status(
             "dataset_id": dataset_id,
             "error_source": error_source,
             "error": error_message or "Unknown indexing error",
-            "recovery_attempts": ["local", "cloudinary", "s3", "gridfs"],
+            "recovery_attempts": ["local", "cloudinary", "s3"],
             "chunk_count": d.get("chunk_count", 0),
             "embedding_count": d.get("embedding_count", 0),
             "processing_time": d.get("processing_time", 0.0),
@@ -781,40 +758,42 @@ async def download_preprocessed_dataset(
 ):
     d = await fetch_user_dataset_or_raise(dataset_id, current_user)
     
-    gridfs_id = d.get("gridfs_id")
-    if not gridfs_id:
-        # Fallback to local file if not in gridfs
-        local_path = d.get("preprocessed_zip_path") or d.get("file_path")
-        if local_path and os.path.exists(local_path):
-            from fastapi.responses import FileResponse
-            return FileResponse(
-                local_path,
+    # 1. Check if S3 key is available (either preprocessed_s3_key or s3_key)
+    preprocessed_s3_key = d.get("preprocessed_s3_key") or d.get("preprocessedS3Key")
+    if preprocessed_s3_key:
+        from fastapi.responses import StreamingResponse
+        from services.s3_service import get_s3_object_stream
+        try:
+            stream = await get_s3_object_stream(preprocessed_s3_key)
+            
+            async def stream_s3():
+                def _read_chunk():
+                    return stream.read(256 * 1024) # 256KB chunk
+                while True:
+                    chunk = await asyncio.to_thread(_read_chunk)
+                    if not chunk:
+                        break
+                    yield chunk
+                    
+            return StreamingResponse(
+                stream_s3(),
                 media_type="application/zip",
-                filename=f"preprocessed_{d.get('name', 'dataset.zip')}"
+                headers={"Content-Disposition": f"attachment; filename=preprocessed_{d.get('name', 'dataset.zip')}"}
             )
-        raise HTTPException(status_code=404, detail="Preprocessed ZIP file not found.")
+        except Exception as e:
+            logger.error(f"Failed to stream preprocessed ZIP from S3 key '{preprocessed_s3_key}': {e}")
+            raise HTTPException(status_code=500, detail=f"S3 download failed: {str(e)}")
 
-    from fastapi.responses import StreamingResponse
-    from motor.motor_asyncio import AsyncIOMotorGridFSBucket
-    from bson import ObjectId
-    
-    db = get_db()
-    try:
-        fs = AsyncIOMotorGridFSBucket(db._db)
-        grid_in = await fs.open_download_stream(ObjectId(gridfs_id))
-        
-        async def stream_gridfs():
-            while True:
-                chunk = await grid_in.read(256 * 1024) # 256KB chunk
-                if not chunk:
-                    break
-                yield chunk
-                
-        return StreamingResponse(
-            stream_gridfs(),
+    # 2. (GridFS fallback removed — GridFS is deprecated, skip to local fallback)
+
+    # 3. Fallback to local preprocessed file if any
+    local_path = d.get("preprocessed_zip_path") or d.get("file_path")
+    if local_path and os.path.exists(local_path):
+        from fastapi.responses import FileResponse
+        return FileResponse(
+            local_path,
             media_type="application/zip",
-            headers={"Content-Disposition": f"attachment; filename=preprocessed_{d.get('name', 'dataset.zip')}"}
+            filename=f"preprocessed_{d.get('name', 'dataset.zip')}"
         )
-    except Exception as e:
-        logger.error(f"Failed to stream ZIP from GridFS: {e}")
-        raise HTTPException(status_code=500, detail=f"GridFS read failed: {str(e)}")
+        
+    raise HTTPException(status_code=404, detail="Preprocessed ZIP file not found.")

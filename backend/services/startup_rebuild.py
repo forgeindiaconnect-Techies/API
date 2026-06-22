@@ -81,7 +81,6 @@ async def run_startup_recovery():
             has_cloud_backup = bool(
                 dataset.get("cloudinary_url") or
                 dataset.get("secure_url") or
-                dataset.get("gridfs_id") or
                 dataset.get("s3_key")
             )
             
@@ -137,7 +136,7 @@ async def run_startup_recovery():
                     new_index = {
                         "name": f"{file_name} index",
                         "dataset_id": dataset_id,
-                        "embedding_model": "paraphrase-MiniLM-L3-v2",
+                        "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
                         "chunk_size": 500 if file_type in ("txt", "md", "docx") else 512,
                         "chunk_overlap": 100 if file_type in ("txt", "md", "docx") else 50,
                         "index_type": "chroma",
@@ -155,7 +154,7 @@ async def run_startup_recovery():
                 # Mark as failed immediately to prevent an infinite recovery loop.
                 logger.warning(
                     f"Startup recovery: Dataset '{dataset_name}' ({dataset_id}) was interrupted in 'processing' "
-                    f"status, but does not have any cloud backup (Cloudinary/GridFS/S3). "
+                    f"status, but does not have any cloud backup (Cloudinary/S3). "
                     f"Marking as failed to prevent crash loop. Re-upload the file to reprocess."
                 )
                 await db.datasets.update_one(
@@ -228,13 +227,12 @@ async def run_startup_recovery():
             has_cloud_backup = bool(
                 dataset.get("cloudinary_url") or
                 dataset.get("secure_url") or
-                dataset.get("gridfs_id") or
                 dataset.get("s3_key")
             )
             if not has_cloud_backup:
                 logger.warning(
                     f"Startup recovery: Dataset '{dataset.get('name') or dataset.get('file_name')}' ({dataset_id}) "
-                    f"does not have a cloud backup (Cloudinary/GridFS/S3). "
+                    f"does not have a cloud backup (Cloudinary/S3). "
                     f"Skipping automated index rebuild to prevent OOM crash on ephemeral disk environments."
                 )
                 continue
@@ -304,7 +302,6 @@ async def run_sequential_rebuilds(dataset_ids: list):
             has_cloud_backup = bool(
                 dataset.get("cloudinary_url") or
                 dataset.get("secure_url") or
-                dataset.get("gridfs_id") or
                 dataset.get("s3_key")
             )
             if not has_cloud_backup:

@@ -152,11 +152,13 @@ async def create_indexes():
         logger.error(f"Failed to create rag_indexes indexes: {e}")
 
     try:
-        try:
-            await db.api_keys.drop_index("key_hash_1")
-        except Exception:
-            pass
-        await db.api_keys.create_index([("key", ASCENDING)], unique=True, sparse=True)
+        # Clean up legacy indexes from when raw keys were stored
+        for legacy_idx in ["key_hash_1", "key_1"]:
+            try:
+                await db.api_keys.drop_index(legacy_idx)
+            except Exception:
+                pass
+        # Only index key_hash (raw keys are no longer stored in MongoDB)
         await db.api_keys.create_index([("key_hash", ASCENDING)], unique=True, sparse=True)
         await db.api_keys.create_index([("user_id", ASCENDING)])
     except Exception as e:
