@@ -20,6 +20,7 @@ async def _build_index(index_id: str, config: dict, db):
     logger.info(f"Lock acquired: starting index build for {index_id}")
     
     temp_path = None
+    is_temp = False
     dataset = None
     try:
         index_doc = await db.rag_indexes.find_one({"_id": get_id_query(index_id)})
@@ -38,11 +39,11 @@ async def _build_index(index_id: str, config: dict, db):
             {"$set": {"status": "building", "error": None}}
         )
 
-        from api.routes.chat import download_file_from_gridfs
+        from services.dataset_service import get_dataset_file
         import os
 
-        # Download from GridFS (happens only once per build)
-        temp_path = await download_file_from_gridfs(dataset)
+        # Retrieve dataset file path (S3 prioritized recovery)
+        temp_path, is_temp = await get_dataset_file(dataset)
         file_type = dataset.get("file_type")
 
         # 1. Extract text / rows using the shared service logic
@@ -52,7 +53,7 @@ async def _build_index(index_id: str, config: dict, db):
         # 2. Create embeddings & save to VectorStore
         if chunks:
             from vector_db.store import VectorStore, get_embedding_model_async
-            embedder = await get_embedding_model_async(config.get("embedding_model", "paraphrase-MiniLM-L3-v2"))
+            embedder = await get_embedding_model_async(config.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2"))
 
             embeddings = []
             batch_size = 32
@@ -98,11 +99,10 @@ async def _build_index(index_id: str, config: dict, db):
     finally:
         rebuilding_indexes.discard(index_id)
         logger.info(f"Lock released: index build task for {index_id} completed.")
-        if temp_path and os.path.exists(temp_path) and dataset:
+        if temp_path and os.path.exists(temp_path) and is_temp:
             try:
-                if dataset.get("gridfs_id") and str(dataset.get("gridfs_id")) in temp_path:
-                    os.remove(temp_path)
-                    logger.info(f"Cleaned up temp file used for indexing: {temp_path}")
+                os.remove(temp_path)
+                logger.info(f"Cleaned up temp file used for indexing: {temp_path}")
             except Exception as clean_err:
                 logger.error(f"Failed to delete temp file {temp_path}: {clean_err}")
 
@@ -112,7 +112,7 @@ async def query_vector_store(index_id: str, query: str, top_k: int, db) -> list:
         return []
 
     from vector_db.store import VectorStore, get_embedding_model_async
-    embedder = await get_embedding_model_async(index.get("embedding_model", "paraphrase-MiniLM-L3-v2"))
+    embedder = await get_embedding_model_async(index.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2"))
     if hasattr(embedder, "encode"):
         if asyncio.iscoroutinefunction(embedder.encode):
             query_emb = await embedder.encode(query)

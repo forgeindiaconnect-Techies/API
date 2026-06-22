@@ -51,4 +51,10 @@ logs/
 pyrightconfig.json
 pyrefly.toml
 
+# Local databases and scratch files
+chroma_db/
+scratch/
+uploads/
+
+
 

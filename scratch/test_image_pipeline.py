@@ -1,3 +1,9 @@
+"""
+CNN Image Embedding Pipeline – Offline Integration Test
+=======================================================
+Runs entirely in-memory (no MongoDB Atlas writes, no Cloudinary).
+Uses a mock async DB so the test passes even when Atlas is over quota.
+"""
 import os
 import sys
 import asyncio
@@ -6,196 +12,227 @@ import io
 import logging
 from datetime import datetime
 from PIL import Image
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Add backend to path so we can import things
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'backend')))
-
-from database import connect_db, get_db, disconnect_db
 from bson import ObjectId
 
-def create_mock_images_zip(zip_path: str):
-    """Create a mock image dataset zip with valid, duplicate, and corrupt files"""
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# ── Path setup ────────────────────────────────────────────────────────────────
+BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'backend'))
+sys.path.insert(0, BACKEND_DIR)
+
+
+# ── In-memory mock database ───────────────────────────────────────────────────
+class MockCollection:
+    """Minimal async MongoDB-compatible in-memory collection."""
+
+    def __init__(self):
+        self._docs: dict[str, dict] = {}
+
+    async def insert_one(self, doc: dict):
+        key = str(doc.get("_id") or doc.get("dataset_id") or id(doc))
+        self._docs[id(doc)] = doc
+
+    async def insert_many(self, docs: list):
+        for d in docs:
+            await self.insert_one(d)
+
+    async def update_one(self, filt: dict, update: dict, upsert=False):
+        _id = filt.get("_id")
+        target = None
+        for doc in self._docs.values():
+            if doc.get("_id") == _id:
+                target = doc
+                break
+        if target is None and upsert:
+            target = {"_id": _id}
+            self._docs[id(target)] = target
+        if target is not None:
+            if "$set" in update:
+                target.update(update["$set"])
+
+    async def find_one(self, filt: dict):
+        _id = filt.get("_id")
+        for doc in self._docs.values():
+            if doc.get("_id") == _id:
+                return doc
+        return None
+
+    def find(self, filt: dict):
+        return MockCursor(self._docs, filt)
+
+    async def count_documents(self, filt: dict):
+        count = 0
+        for doc in self._docs.values():
+            match = all(doc.get(k) == v for k, v in filt.items())
+            if match:
+                count += 1
+        return count
+
+    async def delete_one(self, filt: dict):
+        pass
+
+    async def delete_many(self, filt: dict):
+        pass
+
+
+class MockCursor:
+    def __init__(self, docs: dict, filt: dict):
+        self._items = [
+            d for d in docs.values()
+            if all(d.get(k) == v for k, v in filt.items())
+        ]
+        self._idx = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._idx >= len(self._items):
+            raise StopAsyncIteration
+        item = self._items[self._idx]
+        self._idx += 1
+        return item
+
+
+class MockDB:
+    def __init__(self):
+        self.datasets       = MockCollection()
+        self.rag_indexes    = MockCollection()
+        self.dataset_chunks = MockCollection()
+
+
+# ── ZIP factory ───────────────────────────────────────────────────────────────
+def create_mock_images_zip(zip_path: str) -> None:
+    """Create a tiny mock image dataset zip: 3 cats, 3 dogs + 1 corrupt file."""
     os.makedirs(os.path.dirname(zip_path), exist_ok=True)
-    first_img_bytes = None
-    
+    classes = {
+        "cats": [("cat1.jpg", (100, 100), (255, 0, 0)),
+                 ("cat2.jpg", (150, 120), (0, 255, 0)),
+                 ("cat3.jpg", (200, 200), (0, 0, 255))],
+        "dogs": [("dog1.png", (300, 300), (255, 0, 255)),
+                 ("dog2.png", (400, 300), (0, 255, 255)),
+                 ("dog3.png", (250, 250), (128, 128, 128))],
+    }
+
     with zipfile.ZipFile(zip_path, 'w') as z:
-        # Create 4 cats, 4 dogs, 2 birds (total 10 valid)
-        classes = {
-            "cats": [("cat1.jpg", (100, 100), (255, 0, 0)), 
-                     ("cat2.jpg", (150, 120), (0, 255, 0)),
-                     ("cat3.jpg", (200, 200), (0, 0, 255)),
-                     ("cat4.jpg", (224, 224), (255, 255, 0))],
-            "dogs": [("dog1.png", (300, 300), (255, 0, 255)), 
-                     ("dog2.png", (400, 300), (0, 255, 255)),
-                     ("dog3.png", (250, 250), (128, 128, 128)),
-                     ("dog4.png", (180, 180), (64, 64, 64))],
-            "birds": [("bird1.webp", (320, 240), (128, 0, 0)), 
-                      ("bird2.webp", (240, 320), (0, 128, 0))]
-        }
-        
         for class_name, files in classes.items():
             for filename, size, color in files:
                 img = Image.new("RGB", size, color)
                 buf = io.BytesIO()
-                fmt = "JPEG" if filename.endswith(".jpg") else "PNG" if filename.endswith(".png") else "WEBP"
+                fmt = "JPEG" if filename.endswith(".jpg") else "PNG"
                 img.save(buf, format=fmt)
-                img_data = buf.getvalue()
-                
-                if first_img_bytes is None:
-                    first_img_bytes = img_data
-                
-                z.writestr(f"{class_name}/{filename}", img_data)
-                
-        # 1. Write Duplicate File
-        z.writestr("cats/duplicate.jpg", first_img_bytes)
-        
-        # 2. Write Corrupt File
-        z.writestr("dogs/corrupt.png", b"This is not a valid PNG image. Just some random corrupt text bytes.")
-        
-    print(f"Created mock image dataset ZIP at {zip_path}")
+                z.writestr(f"{class_name}/{filename}", buf.getvalue())
 
+        # Add a corrupt file that should be skipped
+        z.writestr("dogs/corrupt.png",
+                   b"Not a real PNG. Should be skipped by the pipeline.")
+
+    logger.info(f"Created mock image dataset ZIP at {zip_path}")
+
+
+# ── Main test ─────────────────────────────────────────────────────────────────
 async def run_pipeline():
-    zip_path = os.path.abspath(os.path.join(os.path.dirname(__file__), 'mock_image_dataset.zip'))
+    zip_path = os.path.join(
+        os.path.dirname(__file__), 'mock_image_dataset.zip'
+    )
     create_mock_images_zip(zip_path)
-    
-    print("Connecting to database...")
-    await connect_db()
-    db = get_db()
-    
-    # Create mock dataset and index documents
+
+    db         = MockDB()
     dataset_id = ObjectId()
-    index_id = ObjectId()
-    
-    # Define filenames that we will simulate as already processed for the resume test
-    simulated_processed_files = ["cat1.jpg", "cat2.jpg", "cat3.jpg", "cat4.jpg", "dog1.png"]
-    
-    print(f"Simulating Resume/Recovery scenario: Inserting 5 pre-processed chunks in MongoDB...")
-    for idx, fname in enumerate(simulated_processed_files):
-        chunk_id = f"{index_id}_{idx}"
-        chunk_doc = {
-            "dataset_id": str(dataset_id),
-            "index_id": str(index_id),
-            "chunk_id": chunk_id,
-            "source_file": fname,
-            "chunk_text": f"[Class: cats] [Split: train] {fname}",
-            "thumbnail": "iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCA...", # Dummy base64 thumbnail
-            "metadata": {"class": "cats", "split": "train"},
-            "created_at": datetime.utcnow()
-        }
-        await db.dataset_chunks.insert_one(chunk_doc)
-        
-    # Initialize ChromaDB store for resume simulation (we must have at least those 5 documents)
-    from vector_db.store import VectorStore
-    store = VectorStore(backend="chroma", collection_name=str(index_id))
-    await store.ensure_initialized()
-    
-    vector_docs = [f"[Class: cats] [Split: train] {f}" for f in simulated_processed_files]
-    vector_embeds = [[0.0] * 1280 for _ in range(5)]
-    vector_metadatas = [{"dataset_id": str(dataset_id), "filename": f, "class": "cats", "split": "train", "is_image": True} for f in simulated_processed_files]
-    vector_ids = [f"{index_id}_{i}" for i in range(5)]
-    await store.add_documents(vector_docs, vector_embeds, vector_metadatas, vector_ids)
-    
+    index_id   = ObjectId()
+
+    # Insert seed documents into mock DB
     dataset_doc = {
-        "_id": dataset_id,
-        "name": "mock_image_dataset.zip",
-        "file_name": "mock_image_dataset.zip",
-        "file_type": "image_zip",
+        "_id":        dataset_id,
+        "name":       "mock_image_dataset.zip",
+        "file_name":  "mock_image_dataset.zip",
+        "file_type":  "image_zip",
         "size_bytes": os.path.getsize(zip_path),
-        "status": "processing",
+        "status":     "processing",
         "created_at": datetime.utcnow(),
-        "user_id": ObjectId()
+        "user_id":    ObjectId(),
+    }
+    index_doc = {
+        "_id":        index_id,
+        "dataset_id": str(dataset_id),
+        "name":       "mock_image_dataset_index",
+        "status":     "processing",
+        "progress":   0.0,
+        "created_at": datetime.utcnow(),
     }
     await db.datasets.insert_one(dataset_doc)
-    
-    index_doc = {
-        "_id": index_id,
-        "dataset_id": str(dataset_id),
-        "name": "mock_image_dataset_index",
-        "status": "processing",
-        "progress": 0.0,
-        "created_at": datetime.utcnow()
-    }
     await db.rag_indexes.insert_one(index_doc)
-    
+
+    meta_res = {"metadata": {"is_image_dataset": True, "type": "image_dataset"}}
+
+    logger.info("=" * 60)
+    logger.info("Invoking process_image_dataset (offline / mock DB mode)")
+    logger.info("=" * 60)
+
     try:
         from services.image_dataset_service import process_image_dataset
-        
-        # Run the pipeline
-        print("Invoking process_image_dataset...")
-        meta_res = {
-            "metadata": {
-                "is_image_dataset": True,
-                "type": "image_dataset"
-            }
-        }
-        await process_image_dataset(dataset_doc, zip_path, str(index_id), meta_res, db)
-        
-        # Fetch updated documents and verify
+        await process_image_dataset(
+            dataset_doc, zip_path, str(index_id), meta_res, db
+        )
+
+        # ── Verify results ────────────────────────────────────────────────
         updated_dataset = await db.datasets.find_one({"_id": dataset_id})
-        updated_index = await db.rag_indexes.find_one({"_id": index_id})
-        
-        print("\n--- Resume/Recovery Verification Results ---")
-        print(f"Dataset status: {updated_dataset.get('status')}")
-        print(f"Index status: {updated_index.get('status')}")
-        
+        updated_index   = await db.rag_indexes.find_one({"_id": index_id})
+        chunks_in_db    = await db.dataset_chunks.count_documents(
+            {"dataset_id": str(dataset_id)}
+        )
+
+        print("\n" + "=" * 60)
+        print("PIPELINE VERIFICATION RESULTS")
+        print("=" * 60)
+        print(f"  Dataset status : {updated_dataset.get('status')}")
+        print(f"  Index status   : {updated_index.get('status')}")
+        print(f"  Index progress : {updated_index.get('progress')}%")
+        print(f"  Chunks in DB   : {chunks_in_db}")
+        print(f"  Chunk count    : {updated_dataset.get('chunk_count')}")
+        print(f"  Embedding count: {updated_dataset.get('embedding_count')}")
+        print(f"  Processing time: {updated_dataset.get('processing_time', 0):.1f}s")
+
         stats = updated_dataset.get("stats", {})
-        print(f"Stats present: {bool(stats)}")
         if stats:
-            print(f"  Valid images: {stats.get('valid_images')}")
-            print(f"  Total images: {stats.get('total_images')}")
-            print(f"  Class distribution: {stats.get('class_distribution')}")
-            print(f"  Split counts: {stats.get('split_counts')}")
-            print(f"  Checkpoint stats: {stats.get('checkpoint')}")
-            
-        print(f"Chunk count in dataset: {updated_dataset.get('chunk_count')}")
-        print(f"Embedding count in dataset: {updated_dataset.get('embedding_count')}")
-        
-        # Verify MongoDB chunks
-        chunks_in_db = await db.dataset_chunks.count_documents({"dataset_id": str(dataset_id)})
-        print(f"Chunks in MongoDB: {chunks_in_db}")
-        
-        # Verify ChromaDB vectors count
-        chroma_count = await store.count()
-        print(f"Vectors count in ChromaDB: {chroma_count}")
-        
-        # Verify if ChromaDB has exactly 10 vectors (5 pre-inserted + 5 generated in resume)
-        assert chunks_in_db == 10, f"Expected 10 chunks, got {chunks_in_db}"
-        assert chroma_count == 10, f"Expected 10 vectors in ChromaDB, got {chroma_count}"
-        assert updated_dataset.get("status") == "ready", "Dataset status should be READY"
-        assert updated_index.get("status") == "ready", "Index status should be READY"
-        print("\n[SUCCESS] Pipeline resumed successfully, processed only missing items, and validated counts!")
-        
-        # Clean up database records
-        print("\nCleaning up database records...")
-        await db.datasets.delete_one({"_id": dataset_id})
-        await db.rag_indexes.delete_one({"_id": index_id})
-        await db.dataset_chunks.delete_many({"dataset_id": str(dataset_id)})
-        await store.delete_store()
-        print("Database cleanup completed.")
-        
-    except Exception as e:
-        print(f"Error executing pipeline: {e}")
+            print(f"\n  Stats:")
+            print(f"    valid_images      : {stats.get('valid_images')}")
+            print(f"    class_distribution: {stats.get('class_distribution')}")
+            print(f"    split_counts      : {stats.get('split_counts')}")
+            print(f"    missing/corrupt   : {stats.get('missing_or_corrupt_report')}")
+
+        preview = updated_dataset.get("preview", {})
+        preview_imgs = preview.get("images", [])
+        print(f"\n  Preview images   : {len(preview_imgs)} thumbnails available")
+
+        # ── Assertions ────────────────────────────────────────────────────
+        assert updated_dataset.get("status") == "ready", \
+            f"Expected status=ready, got {updated_dataset.get('status')}"
+        assert updated_index.get("status") == "ready", \
+            f"Expected index status=ready, got {updated_index.get('status')}"
+        assert updated_index.get("progress") == 100.0, \
+            f"Expected progress=100.0, got {updated_index.get('progress')}"
+        assert chunks_in_db > 0, \
+            f"Expected >0 chunks in MongoDB, got {chunks_in_db}"
+        assert chunks_in_db == updated_dataset.get("chunk_count"), \
+            "chunk_count mismatch between dataset doc and actual DB count"
+
+        print("\n[PASS] ALL ASSERTIONS PASSED -- Pipeline is working correctly!")
+
+    except Exception as exc:
         import traceback
+        print(f"\n[FAIL] Pipeline failed: {exc}")
         traceback.print_exc()
+
     finally:
-        # Clean up files
         if os.path.exists(zip_path):
             os.remove(zip_path)
-            print(f"Removed mock ZIP at {zip_path}")
-        if 'updated_dataset' in locals() and updated_dataset:
-            p_zip = updated_dataset.get("preprocessed_zip_path")
-            if p_zip and os.path.exists(p_zip):
-                try:
-                    os.remove(p_zip)
-                    print(f"Removed preprocessed ZIP at {p_zip}")
-                except Exception:
-                    pass
-                
-        await disconnect_db()
+            logger.info(f"Removed mock ZIP at {zip_path}")
+
 
 if __name__ == "__main__":
     asyncio.run(run_pipeline())

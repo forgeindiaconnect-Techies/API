@@ -378,7 +378,7 @@ Generate a structured response with these EXACT headings:
                 <div className="text-[11px] text-gray-400 bg-slate-900/40 p-2.5 rounded-lg font-mono inline-block">
                   {dataset.status === 'uploaded' && '⚡ [UPLOADED] Extracting ZIP archive and validating contents...'}
                   {dataset.status === 'extracted' && '⚡ [EXTRACTED] De-duplicating files and running CNN split preprocessing...'}
-                  {dataset.status === 'preprocessed' && '⚡ [PREPROCESSED] Initializing MobileNetV2 model...'}
+                  {dataset.status === 'preprocessed' && '⚡ [PREPROCESSED] Initializing embedding model...'}
                   {dataset.status === 'embedding' && `⚡ [EMBEDDING] Generating embeddings: Batch ${dataset.embedding_progress?.current_batch || 0}/${dataset.embedding_progress?.total_batches || 0}`}
                   {dataset.status === 'embedded' && '⚡ [EMBEDDED] Connecting to ChromaDB and compiling EDA stats...'}
                   {dataset.status === 'processing' && '⚡ Processing dataset index...'}

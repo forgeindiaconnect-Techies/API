@@ -15,7 +15,7 @@ class RAGPipeline:
     def __init__(
         self,
         index_id: str,
-        embedding_model: str = "paraphrase-MiniLM-L3-v2",
+        embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
         chunk_size: int = 512,
         chunk_overlap: int = 50,
         backend: str = "chroma",

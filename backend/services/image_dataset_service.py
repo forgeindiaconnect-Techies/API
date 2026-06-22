@@ -8,6 +8,8 @@ import logging
 import asyncio
 import random
 import zipfile
+import torch
+import gc
 from datetime import datetime
 from PIL import Image, ImageEnhance
 from typing import Dict, Any, List
@@ -20,7 +22,7 @@ TARGET_SIZE = (224, 224)
 THUMBNAIL_SIZE = (96, 96)
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
-async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str, meta_res: dict, db):
+async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str, meta_res: dict, db, is_retry=False):
     """
     CNN Image Preprocessing & Feature Extraction Pipeline
     Status transitions: UPLOADED -> EXTRACTED -> PREPROCESSED -> EMBEDDED -> READY
@@ -29,7 +31,7 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
     file_name = dataset_doc.get("file_name") or dataset_doc.get("name", "dataset.zip")
     start_time = datetime.utcnow()
     
-    logger.info(f"Starting Image Dataset Preprocessing Pipeline for ID: {dataset_id}")
+    logger.info(f"Starting Image Dataset Preprocessing Pipeline for ID: {dataset_id} (is_retry={is_retry})")
     
     # Create temporary directories for processing
     tmp_extract_dir = tempfile.mkdtemp(prefix=f"extract_{dataset_id}_")
@@ -58,15 +60,43 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
         resolution_widths = []
         resolution_heights = []
         class_groups = {}  # class_name -> list of paths
+        total_extracted_images = 0
+
+        # Count total extracted images with supported extensions first
+        for root, _, files in os.walk(tmp_extract_dir):
+            for file in files:
+                ext = os.path.splitext(file)[1].lower()
+                if ext in IMAGE_EXTENSIONS:
+                    total_extracted_images += 1
+
+        logger.info(f"[DEBUG LOG] Total extracted images: {total_extracted_images}")
         
         for root, _, files in os.walk(tmp_extract_dir):
             for file in files:
                 file_path = os.path.join(root, file)
                 ext = os.path.splitext(file)[1].lower()
                 if ext not in IMAGE_EXTENSIONS:
+                    # Remove unsupported file formats from extract folder
+                    try:
+                        os.remove(file_path)
+                    except Exception:
+                        pass
                     continue
                     
-                # 1. Check Duplication (MD5 Hash check)
+                # 1. Check if empty file (0 bytes)
+                try:
+                    if os.path.getsize(file_path) == 0:
+                        raise Exception("Empty image file (0 bytes)")
+                except Exception as sz_err:
+                    logger.warning(f"Skipping empty/corrupted image '{file}': {sz_err}")
+                    corrupted_files.append(f"{file} ({str(sz_err)})")
+                    try:
+                        os.remove(file_path)
+                    except Exception:
+                        pass
+                    continue
+
+                # Check Duplication (MD5 Hash check)
                 try:
                     with open(file_path, 'rb') as f:
                         file_bytes = f.read()
@@ -85,6 +115,7 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
                         img.verify()
                     # Re-open after verify() since verify() closes the file context
                     with Image.open(file_path) as img:
+                        img.load()  # decode pixel data to ensure it is not corrupt
                         w, h = img.size
                         fmt = img.format
                         resolution_widths.append(w)
@@ -117,8 +148,10 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
                         pass
                         
         if not valid_images:
-            raise Exception("No valid image files found in the uploaded ZIP archive.")
+            raise Exception("No valid images available for embedding generation.")
             
+        logger.info(f"Total valid images found: {len(valid_images)}")
+        logger.info(f"[DEBUG LOG] Total valid images: {len(valid_images)}")
         logger.info(f"Validation summary: {len(valid_images)} valid, {len(corrupted_files)} corrupted, {len(duplicate_files)} duplicates.")
         await update_status(db, dataset_id, index_id, "extracted", 35.0)
         
@@ -198,16 +231,29 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
                     arc_name = os.path.relpath(file_full_path, tmp_preprocess_dir)
                     zip_out.write(file_full_path, arc_name)
                     
-        # Backup preprocessed ZIP to GridFS
-        gridfs_id = None
+        # Backup preprocessed ZIP to AWS S3 (Mandatory, replacement of GridFS)
+        preprocessed_s3_key = None
+        preprocessed_s3_url = None
         try:
             with open(preprocessed_zip_local, 'rb') as f:
                 zip_bytes = f.read()
-            from services.dataset_service import upload_file_to_gridfs
-            gridfs_id = await upload_file_to_gridfs(zip_bytes, f"preprocessed_{file_name}", "application/zip")
-            logger.info(f"Uploaded preprocessed dataset ZIP to GridFS with ID: {gridfs_id}")
+            from services.s3_service import upload_file_to_s3
+            import time
+            timestamp = int(time.time())
+            
+            logger.info(f"Uploading preprocessed ZIP to S3: preprocessed_{file_name}")
+            s3_res = await upload_file_to_s3(
+                zip_bytes,
+                f"preprocessed_{file_name}",
+                dataset_id,
+                "application/zip",
+                timestamp
+            )
+            preprocessed_s3_key = s3_res.get("s3_key")
+            preprocessed_s3_url = s3_res.get("s3_url")
+            logger.info(f"Uploaded preprocessed dataset ZIP to S3 with key: {preprocessed_s3_key}")
         except Exception as upload_err:
-            logger.error(f"Failed to upload preprocessed ZIP to GridFS: {upload_err}")
+            logger.error(f"Failed to upload preprocessed ZIP to S3: {upload_err}")
             
         await update_status(db, dataset_id, index_id, "preprocessed", 60.0)
         
@@ -218,31 +264,93 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
         await update_status(db, dataset_id, index_id, "embedding", 65.0)
         
         # Model loading started log
-        logger.info("Model loading started (weights: ImageNet, include_top: False)")
-        model_name = "google/mobilenet_v2_1.0_224"
+        logger.info("Model loading started")
+        
+        processor = None
+        model = None
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model_type = None # "clip" or "efficientnet"
+        
+        def load_clip():
+            from transformers import CLIPProcessor, CLIPModel
+            proc = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+            mod = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+            mod.eval()
+            return proc, mod
+            
+        def load_efficientnet():
+            from transformers import EfficientNetImageProcessor, EfficientNetModel
+            proc = EfficientNetImageProcessor.from_pretrained("google/efficientnet-b0")
+            mod = EfficientNetModel.from_pretrained("google/efficientnet-b0")
+            mod.eval()
+            return proc, mod
+
+        # Try loading CLIP (ViT-B-32)
         try:
-            from transformers import AutoImageProcessor, AutoModel
-            import torch
-            import gc
-            
-            processor = AutoImageProcessor.from_pretrained(model_name)
-            model = AutoModel.from_pretrained(model_name)
-            model.eval()
-            
-            # Use GPU if available
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            logger.info("Attempting to load primary model CLIP (ViT-B-32)...")
+            processor, model = await asyncio.wait_for(
+                asyncio.to_thread(load_clip),
+                timeout=60.0
+            )
             model = model.to(device)
-            logger.info(f"Model loaded successfully. Running on device: {device}")
-        except Exception as model_err:
-            logger.error(f"Failed to load pretrained CNN model: {model_err}")
-            raise Exception(f"Pretrained Model Loading Failure: {model_err}")
-            
+            model_type = "clip"
+            logger.info("Model loaded successfully")
+        except (asyncio.TimeoutError, Exception) as clip_err:
+            logger.warning(f"Failed or timed out loading CLIP (ViT-B-32): {clip_err}. Falling back to EfficientNetB0...")
+            try:
+                logger.info("Attempting to load fallback model EfficientNetB0...")
+                processor, model = await asyncio.wait_for(
+                    asyncio.to_thread(load_efficientnet),
+                    timeout=60.0
+                )
+                model = model.to(device)
+                model_type = "efficientnet"
+                logger.info("Model loaded successfully")
+            except (asyncio.TimeoutError, Exception) as eff_err:
+                logger.error(f"Failed or timed out loading fallback EfficientNetB0: {eff_err}")
+                raise Exception(f"Model Loading Failure: Both CLIP (ViT-B-32) and EfficientNetB0 failed to load within 60s timeout.")
+
+        # Confirm pretrained model loaded successfully and log device allocation
+        if model is None or processor is None:
+            raise Exception("Model Loading Failure: Loaded model or processor is None.")
+        
+        logger.info(f"[DEBUG LOG] Model successfully loaded: {model_type}")
+        logger.info(f"[DEBUG LOG] Target device allocation: {device}")
+        
+        # Get expected dimension dynamically (run sync torch code in thread pool)
+        try:
+            def _detect_dim():
+                dummy_img = Image.new("RGB", TARGET_SIZE)
+                with torch.no_grad():
+                    if model_type == "clip":
+                        inputs = processor(images=dummy_img, return_tensors="pt")
+                        inputs = {k: v.to(device) for k, v in inputs.items()}
+                        dummy_embed = model.get_image_features(**inputs)
+                    else:
+                        inputs = processor(images=dummy_img, return_tensors="pt")
+                        inputs = {k: v.to(device) for k, v in inputs.items()}
+                        outputs = model(**inputs)
+                        if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
+                            dummy_embed = outputs.pooler_output
+                        else:
+                            dummy_embed = outputs.last_hidden_state.mean(dim=[2, 3])
+                return int(dummy_embed.squeeze().shape[-1])
+
+            expected_dim = await asyncio.to_thread(_detect_dim)
+            logger.info(f"Dynamically detected embedding dimension: {expected_dim}")
+            logger.info(f"[DEBUG LOG] Embedding dimension: {expected_dim}")
+        except Exception as dim_err:
+            logger.error(f"Failed to detect embedding dimension: {dim_err}")
+            raise Exception(f"Dimension detection failed: {dim_err}")
+
         # Extract features for all valid preprocessed images
         all_meta_images = train_list + val_list + test_list
         # Filter items that successfully wrote a preprocessed image
         all_meta_images = [item for item in all_meta_images if "preprocessed_path" in item]
         total_images = len(all_meta_images)
-        logger.info(f"Total images detected: {total_images}")
+        logger.info(f"Total images found: {total_images}")
+        if total_images == 0:
+            raise Exception("No valid images available for embedding generation.")
         
         # Checkpoint resume logic: check existing chunks in MongoDB
         processed_chunks = []
@@ -276,7 +384,18 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
         images_to_process = [item for item in all_meta_images if item["filename"] not in processed_filenames]
         logger.info(f"Skipping {len(processed_filenames)} already processed images. Images remaining to process: {len(images_to_process)}")
         
-        batch_size = 32
+        batch_size = 16
+        total_remaining = len(images_to_process)
+        if total_remaining > 0:
+            if total_remaining < batch_size:
+                logger.warning(f"Remaining image count ({total_remaining}) is less than batch size ({batch_size}). Falling back to batch size = {total_remaining}.")
+                batch_size = total_remaining
+        else:
+            # Fallback when there are no images remaining
+            batch_size = 1
+
+        total_batches = (total_remaining + batch_size - 1) // batch_size if total_remaining > 0 else 0
+        
         chunk_docs = []
         preview_items = []  # Keep track of first 24 for UI previews (we can populate from processed chunks or batch runs)
         
@@ -289,25 +408,35 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
             })
             
         processed_count = len(processed_filenames)
-        total_batches = (len(images_to_process) + batch_size - 1) // batch_size if len(images_to_process) > 0 else 0
-        
         start_embedding_time = datetime.utcnow()
         
-        for batch_idx in range(0, len(images_to_process), batch_size):
+        for batch_idx in range(0, total_remaining, batch_size):
             batch_num = (batch_idx // batch_size) + 1
             batch_items = images_to_process[batch_idx : batch_idx + batch_size]
+            
+            # Ensure loader returns non-empty batches
+            if not batch_items:
+                logger.warning(f"DataLoader encountered empty batch slice at index {batch_idx}")
+                continue
+
             batch_pils = []
             batch_filenames = []
             batch_classes = []
             batch_splits = []
             
-            # Batch processing progress log
-            logger.info(f"Batch processing progress: Batch {batch_num}/{total_batches} ({processed_count}/{total_images} images)")
+            # Detailed debugging logs
+            logger.info(f"[DEBUG LOG] Total extracted images: {total_extracted_images}")
+            logger.info(f"[DEBUG LOG] Total valid images: {total_images}")
+            logger.info(f"[DEBUG LOG] Batch size: {batch_size}")
+            logger.info(f"[DEBUG LOG] Number of batches: {total_batches}")
+            logger.info(f"[DEBUG LOG] Current batch index: {batch_num}")
+            logger.info(f"[DEBUG LOG] Embedding dimension: {expected_dim}")
+            logger.info(f"[DEBUG LOG] Saved embeddings count: {processed_count}")
             
             # Load and validate batch PIL images
             for item in batch_items:
                 try:
-                    # Validate image preprocessing (Resize to 224x224, Convert to RGB, skip corrupted)
+                    # Validate image preprocessing (Resize to TARGET_SIZE, Convert to RGB, skip corrupted)
                     p_img = Image.open(item["preprocessed_path"])
                     if p_img.size != TARGET_SIZE:
                         p_img = p_img.resize(TARGET_SIZE, Image.Resampling.LANCZOS)
@@ -327,33 +456,52 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
             if not batch_pils:
                 continue
                 
-            # Extract feature vectors using model (with timeout protection)
-            try:
-                async def _run_batch_extraction():
-                    inputs = processor(images=batch_pils, return_tensors="pt")
-                    inputs = {k: v.to(device) for k, v in inputs.items()}
-                    with torch.no_grad():
-                        outputs = model(**inputs)
-                        # MobileNetV2 uses AdaptiveAvgPool2d to get pooler_output (GlobalAveragePooling2D)
-                        embeddings = outputs.pooler_output
-                        # Squeeze to 1D vectors
-                        embeddings_list = embeddings.squeeze().tolist()
-                        if len(batch_pils) == 1:
-                            embeddings_list = [embeddings_list]
-                    return embeddings_list
-                
-                # Apply 60s timeout protection per batch
-                embeddings_list = await asyncio.wait_for(_run_batch_extraction(), timeout=60.0)
-                logger.info(f"Embeddings generated count: {len(embeddings_list)}")
-            except asyncio.TimeoutError:
-                logger.error(f"Batch {batch_num} embedding generation timed out.")
-                raise Exception(f"Embedding Generation Timeout: Batch {batch_num} exceeded 60s limit.")
-            except Exception as extract_err:
-                import traceback
-                error_tb = traceback.format_exc()
-                logger.error(f"Embeddings generation failed for batch {batch_num}: {extract_err}\nTraceback: {error_tb}")
-                # Continue processing remaining valid images/batches
-                continue
+            # Extract feature vectors using model (with timeout protection and retries)
+            # NOTE: Torch inference is CPU-bound; we offload it to a thread pool via
+            # asyncio.to_thread() so the event loop is never blocked during embedding.
+            max_attempts = 3
+            backoff_delay = 2.0
+            embeddings_list = None
+
+            def _sync_batch_extraction(pils, proc, mod, dev, mtype):
+                """Synchronous torch inference run in a background thread."""
+                inputs = proc(images=pils, return_tensors="pt")
+                inputs = {k: v.to(dev) for k, v in inputs.items()}
+                with torch.no_grad():
+                    if mtype == "clip":
+                        outputs = mod.get_image_features(**inputs)
+                    else:
+                        outputs = mod(**inputs)
+                        if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
+                            outputs = outputs.pooler_output
+                        else:
+                            outputs = outputs.last_hidden_state.mean(dim=[2, 3])
+                    res = outputs.squeeze().tolist()
+                    if len(pils) == 1:
+                        res = [res]
+                return res
+
+            for attempt in range(max_attempts):
+                try:
+                    embeddings_list = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            _sync_batch_extraction,
+                            batch_pils, processor, model, device, model_type
+                        ),
+                        timeout=60.0
+                    )
+                    logger.info(f"Embeddings generated: {len(embeddings_list)}")
+                    break
+                except asyncio.TimeoutError:
+                    logger.warning(f"Batch {batch_num} embedding generation timed out (Attempt {attempt + 1}/{max_attempts})")
+                    if attempt == max_attempts - 1:
+                        raise Exception(f"Embedding Generation Timeout: Batch {batch_num} exceeded 60s limit after {max_attempts} attempts.")
+                    await asyncio.sleep(backoff_delay * (2 ** attempt))
+                except Exception as extract_err:
+                    logger.warning(f"Failed embedding generation at batch {batch_num} (attempt {attempt + 1}/{max_attempts}): {extract_err}")
+                    if attempt == max_attempts - 1:
+                        raise Exception(f"Embedding Generation Failure: Failed to generate vectors for batch {batch_num} after {max_attempts} attempts. Details: {extract_err}")
+                    await asyncio.sleep(backoff_delay * (2 ** attempt))
                 
             # Insert into Vector Store and MongoDB Chunks
             vector_docs = []
@@ -368,9 +516,9 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
                 split_name = batch_splits[b_idx]
                 embedding = embeddings_list[b_idx]
                 
-                # Verify embedding dimensions before insert (must be 1280 for MobileNetV2)
-                if len(embedding) != 1280:
-                    logger.error(f"Embedding dimension mismatch for {filename}: expected 1280, got {len(embedding)}")
+                # Validate embedding dimensions before insertion
+                if len(embedding) != expected_dim:
+                    logger.error(f"Embedding dimension mismatch for {filename}: expected {expected_dim}, got {len(embedding)}")
                     continue
                     
                 chunk_id = f"{index_id}_{processed_count}"
@@ -440,16 +588,21 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
                     except Exception as cp_err:
                         logger.warning(f"Failed to save checkpoint to database: {cp_err}")
                         
-            # Insert vectors to ChromaDB (Batch insert)
+            # Insert vectors to ChromaDB (Batch insert with retry)
             if vector_ids:
                 logger.info(f"ChromaDB insert progress: Staging {len(vector_ids)} vectors for insert")
-                try:
-                    await store.add_documents(vector_docs, vector_embeds, vector_metadatas, vector_ids)
-                    logger.info(f"ChromaDB insert successful: Wrote {len(vector_ids)} vectors to collection {index_id}")
-                except Exception as vector_err:
-                    logger.error(f"ChromaDB insert failed for batch: {vector_err}")
-                    # Continue pipeline
-                    
+                for attempt in range(max_attempts):
+                    try:
+                        await store.add_documents(vector_docs, vector_embeds, vector_metadatas, vector_ids)
+                        logger.info(f"ChromaDB insertion status: Success for {len(vector_ids)} vectors")
+                        break
+                    except Exception as vector_err:
+                        logger.warning(f"ChromaDB insert failed at batch {batch_num} (attempt {attempt + 1}/{max_attempts}): {vector_err}")
+                        if attempt == max_attempts - 1:
+                            logger.error(f"ChromaDB insert failed permanently for batch {batch_num}: {vector_err}")
+                            raise Exception(f"ChromaDB Insertion Failure: {vector_err}")
+                        await asyncio.sleep(backoff_delay * (2 ** attempt))
+                        
             # Insert MongoDB chunk docs for this batch
             if batch_chunk_docs:
                 try:
@@ -499,8 +652,10 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
                 
             # Release memory after batch
             del batch_pils
+            del embeddings_list
             if device.type == "cuda":
                 torch.cuda.empty_cache()
+            import gc
             gc.collect()
             
             # Yield to event loop
@@ -572,7 +727,11 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
                 "stats": eda_stats,
                 "preview": preview_data,
                 "preprocessed_zip_path": preprocessed_zip_local,
-                "gridfs_id": str(gridfs_id) if gridfs_id else None,
+                "preprocessed_s3_key": preprocessed_s3_key,
+                "preprocessed_s3_url": preprocessed_s3_url,
+                "preprocessedS3Key": preprocessed_s3_key,
+                "preprocessedS3Url": preprocessed_s3_url,
+                "gridfs_id": None,
                 "processed_at": datetime.utcnow(),
                 "error_message": None,
                 "chunk_count": chunks_in_db,
@@ -594,16 +753,46 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
         logger.info(f"Image dataset {dataset_id} preprocessing completed successfully in {processing_time:.1f}s.")
         
     except Exception as e:
+        if not is_retry:
+            logger.warning(f"Image preprocessing pipeline failed for dataset {dataset_id}: {e}. Automatically retrying once...")
+            # Clean up directories before retrying
+            try:
+                if os.path.exists(tmp_extract_dir):
+                    shutil.rmtree(tmp_extract_dir)
+                if os.path.exists(tmp_preprocess_dir):
+                    shutil.rmtree(tmp_preprocess_dir)
+            except Exception as cleanup_err:
+                logger.warning(f"Failed to clean up directories before retry: {cleanup_err}")
+                
+            # Clean up vector store to avoid duplicates if partial embeds were written
+            try:
+                from vector_db.store import VectorStore
+                store = VectorStore(backend="chroma", collection_name=index_id)
+                await store.delete_store()
+            except Exception:
+                pass
+                
+            # Clear partially inserted chunks in MongoDB for dataset
+            try:
+                await db.dataset_chunks.delete_many({"dataset_id": dataset_id})
+            except Exception:
+                pass
+
+            # Recursively call with is_retry=True
+            return await process_image_dataset(dataset_doc, zip_path, index_id, meta_res, db, is_retry=True)
+            
         import traceback
         error_tb = traceback.format_exc()
-        logger.exception(f"Image preprocessing pipeline failed for dataset {dataset_id}:")
+        logger.exception(f"Image preprocessing pipeline failed on retry for dataset {dataset_id}:")
         processing_time = (datetime.utcnow() - start_time).total_seconds()
+        
+        detailed_error = f"Pipeline execution failed. Detail: {str(e)}\n\nTraceback:\n{error_tb}"
         
         await db.datasets.update_one(
             {"_id": dataset_doc["_id"]},
             {"$set": {
                 "status": "failed",
-                "error_message": f"{str(e)}\n\nTraceback:\n{error_tb}",
+                "error_message": detailed_error,
                 "processing_time": processing_time
             }}
         )
@@ -612,7 +801,7 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
             {"$set": {
                 "status": "failed",
                 "progress": 0.0,
-                "error": f"{str(e)}\n\nTraceback:\n{error_tb}"
+                "error": detailed_error
             }}
         )
         raise

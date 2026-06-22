@@ -413,7 +413,7 @@ async def generate_image(data: GenerateImageRequest, request: Request, current_u
 async def create_embeddings(
     texts: list[str],
     request: Request,
-    model: str = "paraphrase-MiniLM-L3-v2",
+    model: str = "sentence-transformers/all-MiniLM-L6-v2",
     current_user=Depends(get_current_user),
 ):
     await verify_key_permissions(request, required_scopes=["embed"])

@@ -6,6 +6,7 @@ import sys
 backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend"))
 sys.path.insert(0, backend_dir)
 
+from bson import ObjectId
 from database import connect_db, get_db
 from api.routes.datasets import fmt_dataset
 
@@ -14,7 +15,7 @@ async def main():
     db = get_db()
     
     # Query the dataset document from DB
-    d = await db.datasets.find_one({"_id": "6a2695fa1f1de9768349fdfe"})
+    d = await db.datasets.find_one({"_id": ObjectId("6a362af6333372d856fbc413")})
     if not d:
         print("Dataset not found!")
         return

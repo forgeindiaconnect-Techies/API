@@ -21,20 +21,25 @@ def get_s3_client():
         logger.error(f"Failed to initialize boto3 S3 client: {e}")
         return None
 
-async def upload_file_to_s3(file_bytes: bytes, filename: str, content_type: str = "application/octet-stream") -> dict:
+async def upload_file_to_s3(
+    file_bytes: bytes,
+    filename: str,
+    dataset_id: str,
+    content_type: str = "application/octet-stream",
+    timestamp: int = None
+) -> dict:
     """Upload raw file bytes to AWS S3 and return secure url and key."""
     import asyncio
+    import time
     
     client = get_s3_client()
     if client is None:
         raise Exception("AWS S3 storage is not configured or failed to initialize.")
         
     bucket = settings.AWS_S3_BUCKET
-    import uuid
-    # Create a unique key for the S3 object
-    unique_id = str(uuid.uuid4())
-    ext = filename.split(".")[-1].lower() if "." in filename else "bin"
-    key = f"datasets/{unique_id}.{ext}"
+    if timestamp is None:
+        timestamp = int(time.time())
+    key = f"datasets/{dataset_id}/{timestamp}-{filename}"
     
     def _upload():
         logger.info(f"Uploading file '{filename}' to S3 bucket '{bucket}' as key '{key}'...")
@@ -52,6 +57,32 @@ async def upload_file_to_s3(file_bytes: bytes, filename: str, content_type: str 
         }
         
     return await asyncio.to_thread(_upload)
+
+async def get_s3_object_stream(s3_key: str):
+    """Fetch a file object stream from AWS S3."""
+    import asyncio
+    client = get_s3_client()
+    if client is None:
+        raise Exception("AWS S3 storage is not configured or failed to initialize.")
+        
+    bucket = settings.AWS_S3_BUCKET
+    if not bucket:
+        raise Exception("AWS_S3_BUCKET is not configured in settings.")
+    if not s3_key:
+        raise Exception("s3_key parameter is empty.")
+        
+    def _get_stream():
+        logger.info(f"Streaming key '{s3_key}' from S3 bucket '{bucket}'...")
+        try:
+            # Verify object exists in S3 before stream download
+            client.head_object(Bucket=bucket, Key=s3_key)
+            response = client.get_object(Bucket=bucket, Key=s3_key)
+            return response['Body']
+        except Exception as e:
+            logger.error(f"S3 stream retrieval failed for key '{s3_key}' in bucket '{bucket}': {e}", exc_info=True)
+            raise e
+            
+    return await asyncio.to_thread(_get_stream)
 
 async def download_file_from_s3(s3_key: str, suffix: str = ".txt") -> str:
     """Download a file from AWS S3 to a temporary file path."""

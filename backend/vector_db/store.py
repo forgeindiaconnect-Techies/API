@@ -440,47 +440,29 @@ class HashingTFIDFEmbedder:
 
 _shared_embedding_model = None
 
-def get_embedding_model(model_name: str = "paraphrase-MiniLM-L3-v2"):
-    """Load embedding model with fallbacks to OpenAI and HashingTFIDFEmbedder to ensure zero crashes"""
+def get_embedding_model(model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+    """Load embedding model locally using sentence-transformers to ensure local-only embeddings."""
     global _shared_embedding_model
 
-    # Map the old default to the new lightweight model name to ensure consistency
-    if model_name == "all-MiniLM-L6-v2":
-        model_name = "paraphrase-MiniLM-L3-v2"
+    # Standardize model names for all-MiniLM-L6-v2 variants (including Xenova)
+    if not model_name or "all-minilm-l6-v2" in model_name.lower() or "all-mini-lm" in model_name.lower() or "xenova" in model_name.lower():
+        model_name = "sentence-transformers/all-MiniLM-L6-v2"
 
-    # 0.5 Try Google Gemini if explicitly requested
-    gemini_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY")
-    if gemini_key and not gemini_key.startswith("your-") and ("gemini" in model_name.lower() or "google" in model_name.lower()):
-        try:
-            logger.info("Initializing GeminiEmbedder...")
-            return GeminiEmbedder(api_key=gemini_key)
-        except Exception as e:
-            logger.error(f"Failed to initialize GeminiEmbedder: {e}. Falling back to OpenAI/SentenceTransformer.")
-
-    # 1. Try OpenAI if explicitly requested
-    openai_key = settings.OPENAI_API_KEY or os.environ.get("OPENAI_API_KEY")
-    if openai_key and not openai_key.startswith("sk-...") and ("openai" in model_name.lower() or "text-embedding" in model_name.lower()):
-        try:
-            logger.info("Initializing OpenAIEmbedder...")
-            return OpenAIEmbedder(api_key=openai_key)
-        except Exception as e:
-            logger.error(f"Failed to initialize OpenAIEmbedder: {e}. Falling back to SentenceTransformer.")
-
-    # 2. Try SentenceTransformer
+    # Try SentenceTransformer
     if _shared_embedding_model is not None:
         return _shared_embedding_model
 
     # Check if we should bypass SentenceTransformer to prevent OOM
-    low_memory = os.environ.get("LOW_MEMORY_MODE", "").lower() == "true" or os.environ.get("RENDER", "").lower() == "true"
+    # If the user explicitly requested MiniLM, we attempt loading it first and only fall back on actual failure
+    low_memory = (os.environ.get("LOW_MEMORY_MODE", "").lower() == "true" or os.environ.get("RENDER", "").lower() == "true") and ("minilm" not in model_name.lower())
     if low_memory:
-        logger.warning("Low-memory environment detected (LOW_MEMORY_MODE or RENDER is active). Bypassing heavy SentenceTransformer to prevent OOM crashes. Falling back directly to HashingTFIDFEmbedder.")
+        logger.warning("Low-memory environment detected. Bypassing heavy SentenceTransformer to prevent OOM crashes. Falling back directly to HashingTFIDFEmbedder.")
         return HashingTFIDFEmbedder(384)
 
     os.environ["ORT_LOGGING_LEVEL"] = "3"
     os.environ["ONNXRUNTIME_PROVIDERS"] = '["CPUExecutionProvider"]'
     os.environ["HF_HUB_HTTP_TIMEOUT"] = "15"
     os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-
 
     max_attempts = 2
     for attempt in range(max_attempts):
@@ -511,7 +493,7 @@ def get_embedding_model(model_name: str = "paraphrase-MiniLM-L3-v2"):
                 return HashingTFIDFEmbedder(384)
 
 
-async def get_embedding_model_async(model_name: str = "paraphrase-MiniLM-L3-v2"):
+async def get_embedding_model_async(model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
     """Load embedding model asynchronously on a separate thread pool to prevent blocking the event loop."""
     global _shared_embedding_model
     if _shared_embedding_model is not None:

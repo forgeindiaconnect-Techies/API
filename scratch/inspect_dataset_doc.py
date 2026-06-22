@@ -19,7 +19,7 @@ async def main():
     await connect_db()
     db = get_db()
     
-    dataset_id = "6a2695fa1f1de9768349fdfe"
+    dataset_id = "6a362af6333372d856fbc413"
     print(f"Fetching dataset document for ID: {dataset_id}")
     d = await db.datasets.find_one({"_id": ObjectId(dataset_id)})
     if not d:
