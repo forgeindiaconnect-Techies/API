@@ -19,46 +19,27 @@ async def main():
     await connect_db()
     db = get_db()
     
-    dataset_id = "6a362af6333372d856fbc413"
+    dataset_id = "6a366cb07f339de977dc2248"
     print(f"Fetching dataset document for ID: {dataset_id}")
     d = await db.datasets.find_one({"_id": ObjectId(dataset_id)})
     if not d:
         print("Dataset not found!")
         return
         
-    print("Dataset doc fields:")
+    print("\n--- DATASET DOCUMENT ---")
     for k, v in d.items():
-        if k not in ("stats", "preview"):
-            print(f"  {k}: {v}")
+        print(f"  {k}: {v}")
             
-    print("\n--- Simulating get_dataset_file ---")
-    from services.dataset_service import get_dataset_file
-    temp_path, is_temp = await get_dataset_file(d)
-    print(f"File retrieved at: {temp_path} (is_temp: {is_temp})")
-    
-    try:
-        from datasets.processor import _process_sync, _eda_sync
-        from api.routes.datasets import _generate_preview
+    print("\n--- INDEXES ---")
+    cursor = db.rag_indexes.find({"dataset_id": dataset_id})
+    async for idx in cursor:
+        for k, v in idx.items():
+            print(f"  {k}: {v}")
+        print("-" * 20)
         
-        print("\n--- Running _process_sync ---")
-        meta_res = _process_sync(temp_path, d.get("file_type", ""))
-        print(f"Metadata result: {meta_res}")
-        
-        print("\n--- Running _eda_sync ---")
-        eda_res = _eda_sync(temp_path, d.get("file_type", ""))
-        print(f"EDA result keys: {list(eda_res.keys())}")
-        
-        print("\n--- Running _generate_preview ---")
-        preview_res = _generate_preview(temp_path, d.get("file_type", ""))
-        print(f"Preview result columns: {preview_res.get('columns')}")
-        print(f"Preview rows count: {len(preview_res.get('rows', []))}")
-        
-    except Exception as e:
-        logger.exception(f"Error running processing steps:")
-    finally:
-        if temp_path and is_temp and os.path.exists(temp_path):
-            os.remove(temp_path)
-            print("Temp file cleaned up.")
+    print("\n--- CHUNKS ---")
+    chunk_count = await db.dataset_chunks.count_documents({"dataset_id": dataset_id})
+    print(f"  Total chunks in MongoDB: {chunk_count}")
 
 if __name__ == "__main__":
     asyncio.run(main())

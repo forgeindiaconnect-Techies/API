@@ -36,6 +36,7 @@ celery_app.conf.update(
     redis_socket_connect_timeout=30.0,
     task_routes={
         "workers.tasks.process_dataset_task": {"queue": "datasets"},
+        "workers.tasks.rebuild_dataset_index_task": {"queue": "datasets"},
         "workers.tasks.train_model_task": {"queue": "training"},
         "workers.tasks.build_rag_index_task": {"queue": "rag"},
     },

@@ -336,9 +336,15 @@ async def upload_dataset(
             detail=f"AWS S3 upload failed: {str(upload_err)}. Verify AWS credentials and S3_BUCKET."
         )
 
-    # 5. Add background task for RAG indexing
-    from services.dataset_service import build_index_for_dataset
-    background_tasks.add_task(build_index_for_dataset, doc, db)
+    # 5. Queue indexing task (Try Celery first, fallback to FastAPI BackgroundTasks)
+    try:
+        from workers.tasks import rebuild_dataset_index_task
+        rebuild_dataset_index_task.delay(doc["_id"])
+        logger.info(f"Queued initial indexing task via Celery for dataset {doc['_id']}")
+    except Exception as celery_err:
+        logger.warning(f"Failed to queue task via Celery: {celery_err}. Falling back to FastAPI BackgroundTasks.")
+        from services.dataset_service import build_index_for_dataset
+        background_tasks.add_task(build_index_for_dataset, doc, db)
 
     await cache_clear_user(user_id_str)
     return fmt_dataset(doc)
@@ -539,8 +545,14 @@ async def reprocess_dataset(
     )
     
     # Reprocessing a failed/completed dataset should rebuild its RAG index as well to make it fully functional.
-    from services.dataset_service import build_index_for_dataset
-    background_tasks.add_task(build_index_for_dataset, d, db)
+    try:
+        from workers.tasks import rebuild_dataset_index_task
+        rebuild_dataset_index_task.delay(str(d["_id"]))
+        logger.info(f"Queued reprocess indexing task via Celery for dataset {d['_id']}")
+    except Exception as celery_err:
+        logger.warning(f"Failed to queue task via Celery: {celery_err}. Falling back to FastAPI BackgroundTasks.")
+        from services.dataset_service import build_index_for_dataset
+        background_tasks.add_task(build_index_for_dataset, d, db)
     
     await cache_clear_user(str(current_user["_id"]))
     # Return formatted info immediately with status 'processing'

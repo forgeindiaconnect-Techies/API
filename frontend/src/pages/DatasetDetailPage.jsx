@@ -148,9 +148,9 @@ export default function DatasetDetailPage() {
         }
       }
       
-      // Check total timeout (limit to 5 minutes for larger datasets)
+      // Check total timeout (limit to 30 minutes for larger datasets)
       secondsElapsed += currentInterval / 1000;
-      if (secondsElapsed > 300) {
+      if (secondsElapsed > 1800) {
         setPollingError("Processing is taking longer than expected. Please try refreshing the page later.");
         setReprocessing(false);
         return;
@@ -159,7 +159,7 @@ export default function DatasetDetailPage() {
       timeoutId = setTimeout(pollStatus, currentInterval);
     };
 
-    const isProcessing = dataset && (['processing', 'uploaded', 'extracted', 'preprocessed', 'embedding', 'embedded'].includes(dataset.status) || reprocessing);
+    const isProcessing = dataset && (['processing', 'uploaded', 'extracted', 'preprocessing', 'embedding', 'embedded'].includes(dataset.status) || reprocessing);
     if (isProcessing) {
       setPollingError(null);
       timeoutId = setTimeout(pollStatus, currentInterval);
@@ -294,12 +294,12 @@ Generate a structured response with these EXACT headings:
     )
   }
 
-  const isProcessingState = ['processing', 'uploaded', 'extracted', 'preprocessed', 'embedding', 'embedded'].includes(dataset.status) || reprocessing;
+  const isProcessingState = ['processing', 'uploaded', 'extracted', 'preprocessing', 'embedding', 'embedded'].includes(dataset.status) || reprocessing;
   if (isProcessingState) {
     const steps = [
       { id: 'uploaded', label: 'Uploaded' },
       { id: 'extracted', label: 'Extracted' },
-      { id: 'preprocessed', label: 'Preprocessed' },
+      { id: 'preprocessing', label: 'Preprocessing' },
       { id: 'embedding', label: 'Embedding' },
       { id: 'embedded', label: 'Embedded' },
       { id: 'ready', label: 'Ready' }
@@ -378,7 +378,7 @@ Generate a structured response with these EXACT headings:
                 <div className="text-[11px] text-gray-400 bg-slate-900/40 p-2.5 rounded-lg font-mono inline-block">
                   {dataset.status === 'uploaded' && '⚡ [UPLOADED] Extracting ZIP archive and validating contents...'}
                   {dataset.status === 'extracted' && '⚡ [EXTRACTED] De-duplicating files and running CNN split preprocessing...'}
-                  {dataset.status === 'preprocessed' && '⚡ [PREPROCESSED] Initializing embedding model...'}
+                  {dataset.status === 'preprocessing' && '⚡ [PREPROCESSING] Resizing images, augmenting, and compressing...'}
                   {dataset.status === 'embedding' && `⚡ [EMBEDDING] Generating embeddings: Batch ${dataset.embedding_progress?.current_batch || 0}/${dataset.embedding_progress?.total_batches || 0}`}
                   {dataset.status === 'embedded' && '⚡ [EMBEDDED] Connecting to ChromaDB and compiling EDA stats...'}
                   {dataset.status === 'processing' && '⚡ Processing dataset index...'}

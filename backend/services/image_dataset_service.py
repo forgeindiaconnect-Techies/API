@@ -48,6 +48,8 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(tmp_extract_dir)
             logger.info(f"Extracted zip to {tmp_extract_dir}")
+            if not os.path.exists(tmp_extract_dir) or not os.listdir(tmp_extract_dir):
+                raise Exception("ZIP extraction folder is empty or does not exist.")
         except Exception as e:
             logger.error(f"Failed to extract ZIP archive: {e}")
             raise Exception(f"ZIP Extraction Failure: {e}")
@@ -64,15 +66,33 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
 
         # Count total extracted images with supported extensions first
         for root, _, files in os.walk(tmp_extract_dir):
+            # Check rel_dir to skip dot folders and __MACOSX
+            rel_dir = os.path.relpath(root, tmp_extract_dir)
+            dir_parts = rel_dir.replace("\\", "/").split("/")
+            if any(p == "__MACOSX" or p.startswith(".") for p in dir_parts if p):
+                continue
             for file in files:
+                if file.startswith("."):
+                    continue
                 ext = os.path.splitext(file)[1].lower()
                 if ext in IMAGE_EXTENSIONS:
                     total_extracted_images += 1
 
         logger.info(f"[DEBUG LOG] Total extracted images: {total_extracted_images}")
         
+        file_idx = 0
         for root, _, files in os.walk(tmp_extract_dir):
+            # Check rel_dir to skip dot folders and __MACOSX
+            rel_dir = os.path.relpath(root, tmp_extract_dir)
+            dir_parts = rel_dir.replace("\\", "/").split("/")
+            if any(p == "__MACOSX" or p.startswith(".") for p in dir_parts if p):
+                continue
             for file in files:
+                if file.startswith("."):
+                    continue
+                file_idx += 1
+                if file_idx % 50 == 0:
+                    await asyncio.sleep(0.001)
                 file_path = os.path.join(root, file)
                 ext = os.path.splitext(file)[1].lower()
                 if ext not in IMAGE_EXTENSIONS:
@@ -148,15 +168,16 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
                         pass
                         
         if not valid_images:
-            raise Exception("No valid images available for embedding generation.")
+            raise Exception("No valid images available for embedding generation (validImages = 0).")
             
         logger.info(f"Total valid images found: {len(valid_images)}")
         logger.info(f"[DEBUG LOG] Total valid images: {len(valid_images)}")
         logger.info(f"Validation summary: {len(valid_images)} valid, {len(corrupted_files)} corrupted, {len(duplicate_files)} duplicates.")
-        await update_status(db, dataset_id, index_id, "extracted", 35.0)
+        await update_status(db, dataset_id, index_id, "extracted", 33.0)
         
-        # ─── STEP 3: PREPROCESSED ─────────────────────────────────────────
+        # ─── STEP 3: PREPROCESSING ─────────────────────────────────────────
         logger.info("[Step 3/5] Preprocessing and splitting image dataset...")
+        await update_status(db, dataset_id, index_id, "preprocessing", 50.0)
         
         # Split image lists stratified by class: 70% train, 15% val, 15% test
         train_list = []
@@ -189,8 +210,27 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
         # Process and save images into split/class directories
         splits = {"train": train_list, "val": val_list, "test": test_list}
         
+        logger.info(
+            f"[CNN PIPELINE METRICS]\n"
+            f"  datasetId: {dataset_id}\n"
+            f"  s3Key: {dataset_doc.get('s3_key')}\n"
+            f"  tempPath: {zip_path}\n"
+            f"  extractedPath: {tmp_extract_dir}\n"
+            f"  totalFiles: {total_extracted_images}\n"
+            f"  validImages: {len(valid_images)}\n"
+            f"  rejectedImages: {len(corrupted_files)}\n"
+            f"  duplicateImages: {len(duplicate_files)}\n"
+            f"  trainCount: {len(train_list)}\n"
+            f"  valCount: {len(val_list)}\n"
+            f"  testCount: {len(test_list)}"
+        )
+        
+        preprocess_idx = 0
         for split_name, img_items in splits.items():
             for item in img_items:
+                preprocess_idx += 1
+                if preprocess_idx % 20 == 0:
+                    await asyncio.sleep(0.001)
                 # Prepare directories
                 cls_dir = os.path.join(tmp_preprocess_dir, split_name, item["class"])
                 os.makedirs(cls_dir, exist_ok=True)
@@ -229,6 +269,8 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
                 for file in files:
                     file_full_path = os.path.join(root, file)
                     arc_name = os.path.relpath(file_full_path, tmp_preprocess_dir)
+                    # Convert to forward slashes for Linux compatibility
+                    arc_name = arc_name.replace("\\", "/")
                     zip_out.write(file_full_path, arc_name)
                     
         # Backup preprocessed ZIP to AWS S3 (Mandatory, replacement of GridFS)
@@ -255,13 +297,11 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
         except Exception as upload_err:
             logger.error(f"Failed to upload preprocessed ZIP to S3: {upload_err}")
             
-        await update_status(db, dataset_id, index_id, "preprocessed", 60.0)
-        
         # ─── STEP 4: EMBEDDING & EMBEDDED ─────────────────────────────────
         logger.info("[Step 4/5] Loading pretrained CNN model and generating image embeddings...")
         
-        # Transition status to embedding first
-        await update_status(db, dataset_id, index_id, "embedding", 65.0)
+        # Transition status to embedding
+        await update_status(db, dataset_id, index_id, "embedding", 67.0)
         
         # Model loading started log
         logger.info("Model loading started")
@@ -638,8 +678,8 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
                     }}
                 )
                 
-                # Update index progress: scale from 60% (preprocessed) to 85% (embedded)
-                progress_val = 60.0 + (float(processed_count) / float(total_images if total_images > 0 else 1)) * 25.0
+                # Update index progress: scale from 67% (embedding start) to 85% (embedded)
+                progress_val = 67.0 + (float(processed_count) / float(total_images if total_images > 0 else 1)) * 18.0
                 await db.rag_indexes.update_one(
                     {"_id": ObjectId(index_id)},
                     {"$set": {
@@ -753,7 +793,10 @@ async def process_image_dataset(dataset_doc: dict, zip_path: str, index_id: str,
         logger.info(f"Image dataset {dataset_id} preprocessing completed successfully in {processing_time:.1f}s.")
         
     except Exception as e:
-        if not is_retry:
+        err_msg = str(e)
+        is_permanent_failure = "No valid images" in err_msg or "ZIP Extraction Failure" in err_msg
+        
+        if not is_retry and not is_permanent_failure:
             logger.warning(f"Image preprocessing pipeline failed for dataset {dataset_id}: {e}. Automatically retrying once...")
             # Clean up directories before retrying
             try:
