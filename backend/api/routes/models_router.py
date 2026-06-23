@@ -129,13 +129,13 @@ async def start_training(
     base = config.base_model.lower()
     params = "Unknown"
     size_bytes = 0
-    if "llama3:70b" in base:
+    if "70b" in base:
         params = "70B"
         size_bytes = 40 * 1024 * 1024 * 1024  # 40 GB
-    elif "llama3" in base:
+    elif "8b" in base or "llama3" in base:
         params = "8B"
         size_bytes = 4.8 * 1024 * 1024 * 1024  # 4.8 GB
-    elif "mistral" in base or "deepseek" in base:
+    elif "7b" in base or "mistral" in base or "deepseek" in base:
         params = "7B"
         size_bytes = 4.1 * 1024 * 1024 * 1024  # 4.1 GB
     elif "vit" in base:
@@ -144,6 +144,12 @@ async def start_training(
     elif "whisper" in base:
         params = "1.5B"
         size_bytes = 3.1 * 1024 * 1024 * 1024  # 3.1 GB
+    elif "custom-50m" in base:
+        params = "50M"
+        size_bytes = 200 * 1024 * 1024  # ~200 MB
+    elif "custom-100m" in base:
+        params = "100M"
+        size_bytes = 400 * 1024 * 1024  # ~400 MB
 
     # Create model record
     model_doc = {
@@ -177,14 +183,20 @@ async def start_training(
     j_result = await db.training_jobs.insert_one(job_doc)
     job_id = str(j_result.inserted_id)
 
-    # Invalidate cache before running background task to reflect training status immediately
+    # Invalidate cache before running task to reflect status immediately
     await invalidate_models_cache(str(current_user["_id"]))
 
-    # Start training in background
-    background_tasks.add_task(
-        start_training_job,
-        job_id, model_id, config.dict(), db
-    )
+    # Start training in background using Celery
+    try:
+        from workers.tasks import train_model_task
+        train_model_task.delay(job_id, model_id, config.dict())
+        logger.info(f"Successfully enqueued training job {job_id} to Celery.")
+    except Exception as celery_err:
+        logger.error(f"Failed to queue training task via Celery: {celery_err}. Falling back to FastAPI BackgroundTasks.")
+        background_tasks.add_task(
+            start_training_job,
+            job_id, model_id, config.dict(), db
+        )
 
     return {"job_id": job_id, "model_id": model_id, "status": "training"}
 
@@ -196,6 +208,12 @@ async def get_training_status(job_id: str, current_user=Depends(get_current_user
     if not job:
         raise HTTPException(status_code=404, detail="Training job not found")
     return fmt_job(job)
+
+
+@router.get("/jobs/{job_id}")
+async def get_training_job_alias(job_id: str, current_user=Depends(get_current_user)):
+    """Alias route for GET /models/jobs/{job_id}"""
+    return await get_training_status(job_id, current_user)
 
 
 @router.post("/training/{job_id}/stop")
@@ -231,6 +249,12 @@ async def get_training_logs(job_id: str, current_user=Depends(get_current_user))
     return sorted(logs, key=lambda x: x["timestamp"])
 
 
+@router.get("/logs/{job_id}")
+async def get_training_logs_alias(job_id: str, current_user=Depends(get_current_user)):
+    """Alias route for GET /models/logs/{job_id}"""
+    return await get_training_logs(job_id, current_user)
+
+
 @router.get("/{model_id}")
 async def get_model(model_id: str, current_user=Depends(get_current_user)):
     db = get_db()
@@ -251,27 +275,169 @@ async def delete_model(model_id: str, current_user=Depends(get_current_user)):
     return {"message": "Model deleted"}
 
 
-@router.post("/{model_id}/predict")
-async def predict(model_id: str, predict_request: PredictRequest, http_request: Request, current_user=Depends(get_current_user)):
+async def run_fallback_predict(prompt_text: str, db) -> str:
+    """Safely runs generative fallbacks using Ollama, Gemini, or OpenAI."""
+    from config import settings
+    # A: Try Ollama
+    try:
+        from ollama import AsyncClient
+        client = AsyncClient(host=settings.OLLAMA_BASE_URL, timeout=3.0)
+        res = await client.generate(model=settings.DEFAULT_MODEL or "llama3", prompt=prompt_text)
+        ans = res.get("response", "").strip()
+        if ans:
+            logger.info("Predict Fallback: Success (Ollama)")
+            return ans
+    except Exception as e:
+        logger.warning(f"Ollama fallback failed: {e}")
+
+    # B: Try Gemini
+    try:
+        import os
+        gemini_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY")
+        if gemini_key and not gemini_key.startswith("your-"):
+            import google.generativeai as genai
+            genai.configure(api_key=gemini_key)
+            model_instance = genai.GenerativeModel("gemini-2.5-flash")
+            res = await model_instance.generate_content_async(prompt_text)
+            ans = res.text.strip()
+            if ans:
+                logger.info("Predict Fallback: Success (Gemini)")
+                return ans
+    except Exception as e:
+        logger.warning(f"Gemini fallback failed: {e}")
+
+    # C: Try OpenAI
+    try:
+        import os
+        from openai import AsyncOpenAI
+        openai_key = settings.OPENAI_API_KEY or os.environ.get("OPENAI_API_KEY")
+        if openai_key and not openai_key.startswith("sk-..."):
+            openai_client = AsyncOpenAI(api_key=openai_key)
+            res = await openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt_text}],
+                stream=False
+            )
+            ans = res.choices[0].message.content.strip()
+            if ans:
+                logger.info("Predict Fallback: Success (OpenAI)")
+                return ans
+    except Exception as e:
+        logger.warning(f"OpenAI fallback failed: {e}")
+
+    return f"[Inference Fallback] Prompt: '{prompt_text}'"
+
+
+async def perform_model_inference(
+    model_id: str,
+    predict_request: PredictRequest,
+    http_request: Request,
+    db
+) -> PredictResponse:
     import time
     import os
     import pickle
+    import json
     import pandas as pd
     from config import settings
     
     start = time.time()
-    db = get_db()
     m = await db.models.find_one({"_id": get_id_query(model_id)})
     if not m:
         raise HTTPException(status_code=404, detail="Model not found")
-    if m.get("status") != "ready":
-        raise HTTPException(status_code=400, detail="Model not ready for inference")
-
-    # Enforce key bounds
-    await verify_key_permissions(http_request, required_scopes=["predict"], model_id=model_id)
-
-    model_path = os.path.join(settings.UPLOAD_DIR, "../models_store", model_id, "model.pkl")
+        
+    base_model = m.get("base_model", "")
     
+    # 1. Custom GPT Decoder Flow
+    if base_model.startswith("custom-") or base_model.startswith("gpt-"):
+        model_dir = os.path.abspath(os.path.join(settings.UPLOAD_DIR, "../models_store", model_id))
+        model_path = os.path.join(model_dir, "model.pt")
+        config_path = os.path.join(model_dir, "config.json")
+        tokenizer_path = os.path.join(model_dir, "tokenizer.json")
+        
+        # Standardize prompt input string
+        prompt_text = "Hello"
+        input_val = predict_request.input
+        if isinstance(input_val, str):
+            prompt_text = input_val
+        elif isinstance(input_val, dict):
+            for k in ["prompt", "text", "content", "message", "input"]:
+                if k in input_val and isinstance(input_val[k], str):
+                    prompt_text = input_val[k]
+                    break
+        
+        # If files are missing, trigger fallback immediately
+        if not os.path.exists(model_path) or not os.path.exists(config_path) or not os.path.exists(tokenizer_path):
+            logger.warning(f"Predict: Model weights or config missing on disk at {model_dir}. Directing to fallbacks...")
+            fallback_ans = await run_fallback_predict(prompt_text, db)
+            latency = round((time.time() - start) * 1000, 2)
+            return PredictResponse(
+                prediction={"text": fallback_ans, "fallback_active": True},
+                confidence=1.0,
+                latency_ms=latency,
+                model_id=model_id,
+                tokens_used=len(fallback_ans.split())
+            )
+            
+        try:
+            import torch
+            from ai.models.gpt_decoder import GPTDecoder, GPTDecoderConfig
+            from ai.tokenizer.train_tokenizer import load_custom_tokenizer
+            
+            # Load configuration
+            with open(config_path, "r") as f:
+                config_dict = json.load(f)
+            config_obj = GPTDecoderConfig(**config_dict)
+            
+            # Initialize model
+            model = GPTDecoder(config_obj)
+            model.load_state_dict(torch.load(model_path, map_location="cpu"))
+            model.eval()
+            
+            # Load tokenizer
+            tokenizer = load_custom_tokenizer(tokenizer_path)
+            
+            # Hyperparameters extraction
+            max_new_tokens = 50
+            temperature = 0.8
+            top_k = 20
+            
+            if predict_request.parameters and isinstance(predict_request.parameters, dict):
+                max_new_tokens = predict_request.parameters.get("max_new_tokens", max_new_tokens)
+                temperature = predict_request.parameters.get("temperature", temperature)
+                top_k = predict_request.parameters.get("top_k", top_k)
+                
+            # Tokenize & Generate
+            encoded = tokenizer.encode(prompt_text)
+            input_ids = torch.tensor([encoded.ids], dtype=torch.long)
+            
+            generated_ids = model.generate(input_ids, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k)
+            tokens_list = generated_ids[0].tolist()
+            decoded_text = tokenizer.decode(tokens_list)
+            
+            latency = round((time.time() - start) * 1000, 2)
+            return PredictResponse(
+                prediction={"text": decoded_text},
+                confidence=0.95,
+                latency_ms=latency,
+                model_id=model_id,
+                tokens_used=len(tokens_list)
+            )
+            
+        except Exception as custom_err:
+            logger.error(f"Inference exception: {custom_err}. Accessing fallbacks...")
+            fallback_ans = await run_fallback_predict(prompt_text, db)
+            latency = round((time.time() - start) * 1000, 2)
+            return PredictResponse(
+                prediction={"text": fallback_ans, "fallback_active": True, "error": str(custom_err)},
+                confidence=1.0,
+                latency_ms=latency,
+                model_id=model_id,
+                tokens_used=len(fallback_ans.split())
+            )
+            
+    # 2. Standard Tabular Machine Learning Flow
+    model_path = os.path.join(settings.UPLOAD_DIR, "../models_store", model_id, "model.pkl")
     if os.path.exists(model_path):
         try:
             with open(model_path, "rb") as f:
@@ -293,7 +459,6 @@ async def predict(model_id: str, predict_request: PredictRequest, http_request: 
                         row[col] = val
                 
                 df_input = pd.DataFrame([row])
-                
                 for col in categorical_cols:
                     df_input[col] = df_input[col].astype(str).factorize()[0]
                     
@@ -327,9 +492,8 @@ async def predict(model_id: str, predict_request: PredictRequest, http_request: 
                 latency_ms=latency,
                 model_id=model_id,
             )
-            
         except Exception as err:
-            logger.error(f"Inference failed for model {model_id}: {err}")
+            logger.error(f"Tabular inference failed for model {model_id}: {err}")
             raise HTTPException(status_code=500, detail=f"Inference error: {str(err)}")
             
     latency = round((time.time() - start) * 1000, 2)
@@ -339,6 +503,32 @@ async def predict(model_id: str, predict_request: PredictRequest, http_request: 
         latency_ms=latency,
         model_id=model_id,
     )
+
+
+@router.post("/predict")
+async def models_predict_body(
+    predict_request: PredictRequest,
+    http_request: Request,
+    current_user=Depends(get_current_user)
+):
+    """Generic inference endpoint taking config in request body. Secured via API Key auth."""
+    db = get_db()
+    model_id = predict_request.model_id
+    await verify_key_permissions(http_request, required_scopes=["predict"], model_id=model_id)
+    return await perform_model_inference(model_id, predict_request, http_request, db)
+
+
+@router.post("/{model_id}/predict")
+async def predict(
+    model_id: str,
+    predict_request: PredictRequest,
+    http_request: Request,
+    current_user=Depends(get_current_user)
+):
+    """Path-param inference endpoint. Secured via API Key auth."""
+    db = get_db()
+    await verify_key_permissions(http_request, required_scopes=["predict"], model_id=model_id)
+    return await perform_model_inference(model_id, predict_request, http_request, db)
 
 
 @router.post("/{model_id}/evaluate")

@@ -38,6 +38,31 @@ export default function ModelsPage() {
   const [visibleCount, setVisibleCount] = useState(6)
   const pollIntervalRef = useRef(null)
 
+  const [expandedModelId, setExpandedModelId] = useState(null)
+  const [testPrompt, setTestPrompt] = useState('')
+  const [testResult, setTestResult] = useState('')
+  const [testLoading, setTestLoading] = useState(false)
+
+  const runTestInference = async (modelId) => {
+    setTestLoading(true)
+    setTestResult('')
+    try {
+      const { data } = await modelAPI.predict(modelId, { input: testPrompt })
+      if (data.prediction && data.prediction.text) {
+        setTestResult(data.prediction.text)
+      } else {
+        setTestResult(JSON.stringify(data.prediction, null, 2))
+      }
+      toast.success('Inference completed!')
+    } catch (err) {
+      console.error(err)
+      toast.error(err.response?.data?.detail || 'Inference failed')
+      setTestResult('Error: Failed to fetch generation response.')
+    } finally {
+      setTestLoading(false)
+    }
+  }
+
   const fetchModels = async (showLoading = true) => {
     if (showLoading) setLoading(true)
     try {
@@ -204,6 +229,13 @@ export default function ModelsPage() {
                 <motion.div
                   key={model.id}
                   layout
+                  onClick={() => {
+                    if (model.status === 'ready') {
+                      setExpandedModelId(expandedModelId === model.id ? null : model.id)
+                      setTestResult('')
+                      setTestPrompt('')
+                    }
+                  }}
                   className="card p-5 space-y-4 cursor-pointer hover:border-opacity-60 transition-all"
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -250,6 +282,34 @@ export default function ModelsPage() {
                           <p className="text-xs" style={{ color: 'var(--text-muted)' }}>{label}</p>
                         </div>
                       ))}
+                    </div>
+                  )}
+
+                  {model.status === 'ready' && expandedModelId === model.id && (
+                    <div className="p-3.5 rounded-lg border border-slate-700 bg-slate-900/60 space-y-3" onClick={e => e.stopPropagation()}>
+                      <p className="text-xs font-semibold text-slate-300">Test Model Generation</p>
+                      <div className="flex gap-2">
+                        <textarea
+                          rows={1}
+                          value={testPrompt}
+                          onChange={e => setTestPrompt(e.target.value)}
+                          placeholder="Enter test prompt (Tamil or English)..."
+                          className="input-base text-xs flex-1 resize-none py-2"
+                        />
+                        <button
+                          onClick={() => runTestInference(model.id)}
+                          disabled={testLoading || !testPrompt.trim()}
+                          className="btn-primary text-xs px-4 flex-shrink-0"
+                        >
+                          {testLoading ? 'Running...' : 'Generate'}
+                        </button>
+                      </div>
+                      {testResult && (
+                        <div className="p-3 rounded border border-slate-700/60 bg-slate-900 text-xs text-slate-200 font-mono whitespace-pre-wrap max-h-36 overflow-y-auto">
+                          <strong>Output:</strong>
+                          <p className="mt-1">{testResult}</p>
+                        </div>
+                      )}
                     </div>
                   )}
 

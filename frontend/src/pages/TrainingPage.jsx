@@ -11,6 +11,8 @@ const BASE_MODELS = [
   { id: 'llama3:70b', label: 'Llama 3 70B', type: 'text' },
   { id: 'mistral', label: 'Mistral 7B', type: 'text' },
   { id: 'deepseek', label: 'DeepSeek 7B', type: 'text' },
+  { id: 'custom-50m', label: 'Custom GPT 50M (Scratch)', type: 'text' },
+  { id: 'custom-100m', label: 'Custom GPT 100M (Scratch)', type: 'text' },
   { id: 'vit', label: 'ViT-B/16', type: 'vision' },
   { id: 'whisper', label: 'Whisper Large', type: 'audio' },
 ]
@@ -91,7 +93,7 @@ export default function TrainingPage() {
       }
 
       // Check termination states
-      if (job.status === 'ready') {
+      if (job.status === 'ready' || job.status === 'completed') {
         setTraining(false)
         setProgress(100)
         toast.success('Training completed successfully!')
@@ -99,7 +101,7 @@ export default function TrainingPage() {
           clearInterval(pollIntervalRef.current)
           pollIntervalRef.current = null
         }
-      } else if (job.status === 'error') {
+      } else if (job.status === 'error' || job.status === 'failed') {
         setTraining(false)
         toast.error('Training job failed!')
         if (pollIntervalRef.current) {

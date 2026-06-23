@@ -31,33 +31,64 @@ def process_dataset_task(self, dataset_id: str, file_path: str, file_type: str):
 
 @celery_app.task(bind=True, name="workers.tasks.train_model_task", max_retries=1)
 def train_model_task(self, job_id: str, model_id: str, config: dict):
-    """Train / fine-tune a model"""
-    import time
-    import math
+    """Train / fine-tune a model using PyTorch CLM or fallback machine learning trainers"""
+    import asyncio
+    import logging
+    from database import get_db, connect_db
+    from auth.utils import get_id_query
+    from ai.training.custom_trainer import run_custom_llm_training
+    from training.trainer import start_training_job
 
-    epochs = config.get("epochs", 3)
-    total_steps = epochs * 100
+    logger.info(f"Celery Worker: Starting training task for job {job_id} | model {model_id}")
 
-    for step in range(total_steps):
-        pct = (step / total_steps) * 100
-        train_loss = 2.3 * math.exp(-step / (total_steps * 0.4)) + 0.1
-        self.update_state(
-            state="PROGRESS",
-            meta={
-                "progress": round(pct, 1),
-                "step": step,
-                "train_loss": round(train_loss, 4),
-                "epoch": step // 100 + 1,
-            },
-        )
-        time.sleep(0.05)
+    async def _run():
+        db = get_db()
+        if db is None:
+            await connect_db()
+            db = get_db()
+
+        base_model = config.get("base_model", "")
+        if base_model.startswith("custom-") or base_model.startswith("gpt-"):
+            logger.info("Celery Worker: Routing to custom decoder-only CLM training flow...")
+            await db.training_jobs.update_one(
+                {"_id": get_id_query(job_id)},
+                {"$set": {"status": "training"}}
+            )
+            await db.models.update_one(
+                {"_id": get_id_query(model_id)},
+                {"$set": {"status": "training"}}
+            )
+            await run_custom_llm_training(job_id, model_id, config, db)
+        else:
+            logger.info("Celery Worker: Routing to standard tabular ML training flow...")
+            await db.training_jobs.update_one(
+                {"_id": get_id_query(job_id)},
+                {"$set": {"status": "training"}}
+            )
+            await db.models.update_one(
+                {"_id": get_id_query(model_id)},
+                {"$set": {"status": "training"}}
+            )
+            await start_training_job(job_id, model_id, config, db)
+
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    if loop.is_running():
+        import threading
+        t = threading.Thread(target=lambda: asyncio.run(_run()))
+        t.start()
+        t.join()
+    else:
+        loop.run_until_complete(_run())
 
     return {
         "job_id": job_id,
         "model_id": model_id,
-        "accuracy": 0.924,
-        "f1_score": 0.918,
-        "status": "ready",
+        "status": "ready"
     }
 
 

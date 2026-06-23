@@ -183,37 +183,86 @@ Generate a natural language response."""
     answer_text = ""
     llm_connected = False
 
-    # A: Try Ollama first
-    global _ollama_online, _last_ollama_check
-    current_time = time.time()
-    if not _ollama_online and (current_time - _last_ollama_check > 300):
-        # Retry connection status check every 5 minutes
-        _ollama_online = True
-        logger.info("Retrying Ollama connection check...")
-
-    if _ollama_online:
+    # Check if the requested model is a custom trained decoder model
+    is_custom_model = False
+    custom_model_id = None
+    if model:
         try:
-            client = AsyncClient(
-                host=settings.OLLAMA_BASE_URL,
-                headers={"bypass-tunnel-reminder": "true"},
-                timeout=1.5  # Fast 1.5 seconds connection timeout
+            m_doc = await db.models.find_one({"_id": get_id_query(model)})
+            if m_doc:
+                base_name = m_doc.get("base_model", "")
+                if base_name.startswith("custom-") or base_name.startswith("gpt-"):
+                    is_custom_model = True
+                    custom_model_id = str(m_doc["_id"])
+        except Exception as e:
+            logger.warning(f"Error checking custom model: {e}")
+
+    if is_custom_model and custom_model_id:
+        try:
+            logger.info(f"RAG: Routing generation to custom trained decoder LLM (ID: {custom_model_id})")
+            from models import PredictRequest
+            from api.routes.models_router import perform_model_inference
+            
+            predict_req = PredictRequest(
+                model_id=custom_model_id,
+                input={"prompt": prompt},
+                parameters={"max_new_tokens": 100, "temperature": 0.7, "top_k": 20}
             )
-            res = await client.generate(
-                model=model or settings.DEFAULT_MODEL or "llama3",
-                prompt=prompt,
-                stream=False
+            
+            # Create a mock Request object for verification context
+            class DummyRequest:
+                class State:
+                    api_key = None
+                state = State()
+                
+            pred_response = await perform_model_inference(
+                model_id=custom_model_id,
+                predict_request=predict_req,
+                http_request=DummyRequest(),
+                db=db
             )
-            answer_text = res.get("response", "").strip()
-            if answer_text:
+            
+            ans = pred_response.prediction.get("text", "").strip()
+            if ans:
+                answer_text = ans
                 llm_connected = True
-                logger.info("LLM response status: Success (Ollama)")
+                logger.info("LLM response status: Success (Custom Model RAG)")
                 logger.info("[OK] LLM response received")
-        except Exception as ollama_err:
-            _ollama_online = False
-            _last_ollama_check = current_time
-            logger.warning(f"Ollama connection failed (offline): {ollama_err}. Bypassing for subsequent requests. Trying fallback...")
-    else:
-        logger.info("Ollama is cached offline. Skipping connection attempt and trying fallbacks immediately.")
+        except Exception as custom_err:
+            logger.error(f"Custom model RAG generation failed: {custom_err}. Accessing standard LLMs...")
+
+    # A: Try Ollama first
+    if not llm_connected:
+        global _ollama_online, _last_ollama_check
+        current_time = time.time()
+        if not _ollama_online and (current_time - _last_ollama_check > 300):
+            # Retry connection status check every 5 minutes
+            _ollama_online = True
+            logger.info("Retrying Ollama connection check...")
+
+        if _ollama_online:
+            try:
+                client = AsyncClient(
+                    host=settings.OLLAMA_BASE_URL,
+                    headers={"bypass-tunnel-reminder": "true"},
+                    timeout=1.5  # Fast 1.5 seconds connection timeout
+                )
+                res = await client.generate(
+                    model=model if model and not is_custom_model else settings.DEFAULT_MODEL or "llama3",
+                    prompt=prompt,
+                    stream=False
+                )
+                answer_text = res.get("response", "").strip()
+                if answer_text:
+                    llm_connected = True
+                    logger.info("LLM response status: Success (Ollama)")
+                    logger.info("[OK] LLM response received")
+            except Exception as ollama_err:
+                _ollama_online = False
+                _last_ollama_check = current_time
+                logger.warning(f"Ollama connection failed (offline): {ollama_err}. Bypassing for subsequent requests. Trying fallback...")
+        else:
+            logger.info("Ollama is cached offline. Skipping connection attempt and trying fallbacks immediately.")
         
     # B: Try Google Gemini fallback if Ollama is unavailable (only when external APIs are enabled)
     if not llm_connected and settings.USE_EXTERNAL_APIS:
