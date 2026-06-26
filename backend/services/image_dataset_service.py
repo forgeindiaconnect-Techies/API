@@ -878,6 +878,22 @@ async def update_status(db, dataset_id: str, index_id: str, status_str: str, pro
         {"$set": {"status": status_str, "progress": progress_val}}
     )
     logger.info(f"Status transition -> {status_str.upper()} ({progress_val}%)")
+    try:
+        from bson import ObjectId as BsonObjectId
+        dataset_doc = await db.datasets.find_one({"_id": BsonObjectId(dataset_id)})
+        if dataset_doc:
+            from services.dataset_service import log_dataset_status
+            log_dataset_status(
+                dataset_id=str(dataset_id),
+                file_path=dataset_doc.get("file_path"),
+                file_type=dataset_doc.get("file_type") or dataset_doc.get("file_name", "").split(".")[-1].lower() if dataset_doc.get("file_name") else "zip",
+                status=status_str,
+                progress=progress_val,
+                rows=dataset_doc.get("rows"),
+                cols=dataset_doc.get("cols")
+            )
+    except Exception as log_err:
+        logger.warning(f"Failed to log structured status update: {log_err}")
 
 
 def apply_augmentation(img: Image.Image) -> Image.Image:

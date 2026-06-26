@@ -14,6 +14,19 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+def log_dataset_status(dataset_id: str, file_path: str, file_type: str, status: str, progress: float, rows: int = None, cols: int = None, error_trace: str = None):
+    """Write structured logs for dataset processing status containing all required fields."""
+    logger.info(
+        f"[DATASET PROCESS STATUS] datasetId: {dataset_id} | "
+        f"filePath: {file_path} | "
+        f"fileType: {file_type} | "
+        f"status: {status} | "
+        f"progress: {progress}% | "
+        f"rows: {rows} | "
+        f"cols: {cols}"
+        f"{f' | errorTrace: {error_trace}' if error_trace else ''}"
+    )
+
 async def download_file_from_cloudinary(url: str) -> str:
     """Download a file from Cloudinary URL to a temporary file path."""
     suffix = "." + url.split(".")[-1].split("?")[0].lower()
@@ -39,7 +52,37 @@ async def extract_text_from_file(file_path: str, file_type: str) -> list:
         if file_type == "csv":
             logger.info(f"Memory optimization: Reading CSV '{file_path}' in chunks of 1000 rows.")
             import gc
-            for chunk_df in pd.read_csv(file_path, chunksize=1000):
+            
+            # Auto-detect encoding
+            detected_enc = None
+            try:
+                import chardet
+                with open(file_path, "rb") as f:
+                    rawdata = f.read(20000)
+                    result = chardet.detect(rawdata)
+                    detected_enc = result.get("encoding")
+            except Exception as e:
+                logger.warning(f"Chardet failed to detect encoding during extract: {e}")
+
+            encodings = [detected_enc] if detected_enc else []
+            encodings += ["utf-8", "latin-1", "utf-8-sig", "cp1252"]
+            reader = None
+            for enc in encodings:
+                if not enc:
+                    continue
+                try:
+                    for test_chunk in pd.read_csv(file_path, chunksize=1, encoding=enc, on_bad_lines="skip"):
+                        break
+                    reader = pd.read_csv(file_path, chunksize=1000, encoding=enc, on_bad_lines="skip")
+                    break
+                except Exception:
+                    continue
+            if reader is None:
+                reader = pd.read_csv(file_path, chunksize=1000, on_bad_lines="skip")
+            
+            for chunk_df in reader:
+                # Remove completely empty rows from the chunk
+                chunk_df = chunk_df.dropna(how="all")
                 for i, row in chunk_df.iterrows():
                     row_str = ", ".join([f"{col}: {val}" for col, val in row.items() if pd.notnull(val)])
                     if row_str.strip():
@@ -50,6 +93,7 @@ async def extract_text_from_file(file_path: str, file_type: str) -> list:
             logger.info(f"Memory optimization: Reading Excel file '{file_path}'...")
             import gc
             df = pd.read_excel(file_path)
+            df = df.dropna(how="all")
             for i, row in df.iterrows():
                 row_str = ", ".join([f"{col}: {val}" for col, val in row.items() if pd.notnull(val)])
                 if row_str.strip():
@@ -62,30 +106,146 @@ async def extract_text_from_file(file_path: str, file_type: str) -> list:
             reader = PyPDF2.PdfReader(f)
             for page_num in range(len(reader.pages)):
                 page_text = reader.pages[page_num].extract_text()
-                if page_text:
-                    chunks.append(page_text)
+                if page_text and page_text.strip():
+                    chunks.append(page_text.strip())
     elif file_type in ("txt", "md"):
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            text = f.read()
+        import re
+        
+        # Auto-detect encoding
+        detected_enc = None
+        try:
+            import chardet
+            with open(file_path, "rb") as f:
+                rawdata = f.read(50000)
+                result = chardet.detect(rawdata)
+                detected_enc = result.get("encoding")
+        except Exception as e:
+            logger.warning(f"Chardet failed to detect encoding: {e}")
+
+        encodings = [detected_enc] if detected_enc else []
+        encodings += ["utf-8", "utf-8-sig", "latin-1", "cp1252"]
+        text = None
+        
+        for enc in encodings:
+            if not enc:
+                continue
+            try:
+                with open(file_path, "r", encoding=enc) as f:
+                    text = f.read()
+                break
+            except Exception:
+                continue
+
+        if text is None:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+
+        # Split into paragraphs, remove empty paragraphs
+        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+        
+        # Paragraph-based chunking with overlap
+        current_chunk = []
+        current_len = 0
         chunk_size = 500
         chunk_overlap = 100
-        step = chunk_size - chunk_overlap
-        for i in range(0, len(text), step):
-            chunk = text[i:i+chunk_size]
-            if chunk.strip():
-                chunks.append(chunk)
+        
+        for p in paragraphs:
+            if len(p) > chunk_size:
+                if current_chunk:
+                    chunks.append("\n\n".join(current_chunk))
+                    current_chunk = []
+                    current_len = 0
+                sentences = re.split(r'(?<=[.!?])\s+', p)
+                sub_chunk = []
+                sub_len = 0
+                for s in sentences:
+                    if sub_len + len(s) > chunk_size:
+                        if sub_chunk:
+                            chunks.append(" ".join(sub_chunk))
+                        sub_chunk = [s]
+                        sub_len = len(s)
+                    else:
+                        sub_chunk.append(s)
+                        sub_len += len(s) + 1
+                if sub_chunk:
+                    chunks.append(" ".join(sub_chunk))
+            else:
+                if current_len + len(p) > chunk_size:
+                    chunks.append("\n\n".join(current_chunk))
+                    if len(p) < chunk_overlap:
+                        current_chunk = [current_chunk[-1], p] if current_chunk else [p]
+                        current_len = sum(len(x) for x in current_chunk) + 2
+                    else:
+                        current_chunk = [p]
+                        current_len = len(p)
+                else:
+                    current_chunk.append(p)
+                    current_len += len(p) + 2
+        if current_chunk:
+            chunks.append("\n\n".join(current_chunk))
+            
     elif file_type == "docx":
         import docx
+        import re
         doc = docx.Document(file_path)
-        paragraphs = [p.text for p in doc.paragraphs if p.text]
-        text = "\n".join(paragraphs)
+        
+        # Extract paragraphs preserving bold/italic runs as Markdown formatting
+        paragraphs = []
+        for p in doc.paragraphs:
+            p_text = ""
+            for run in p.runs:
+                text = run.text
+                if not text:
+                    continue
+                if run.bold:
+                    text = f"**{text}**"
+                if run.italic:
+                    text = f"*{text}*"
+                p_text += text
+            if p_text.strip():
+                paragraphs.append(p_text.strip())
+                
+        # Paragraph-based chunking
+        current_chunk = []
+        current_len = 0
         chunk_size = 500
         chunk_overlap = 100
-        step = chunk_size - chunk_overlap
-        for i in range(0, len(text), step):
-            chunk = text[i:i+chunk_size]
-            if chunk.strip():
-                chunks.append(chunk)
+        
+        for p in paragraphs:
+            if len(p) > chunk_size:
+                if current_chunk:
+                    chunks.append("\n\n".join(current_chunk))
+                    current_chunk = []
+                    current_len = 0
+                sentences = re.split(r'(?<=[.!?])\s+', p)
+                sub_chunk = []
+                sub_len = 0
+                for s in sentences:
+                    if sub_len + len(s) > chunk_size:
+                        if sub_chunk:
+                            chunks.append(" ".join(sub_chunk))
+                        sub_chunk = [s]
+                        sub_len = len(s)
+                    else:
+                        sub_chunk.append(s)
+                        sub_len += len(s) + 1
+                if sub_chunk:
+                    chunks.append(" ".join(sub_chunk))
+            else:
+                if current_len + len(p) > chunk_size:
+                    chunks.append("\n\n".join(current_chunk))
+                    if len(p) < chunk_overlap:
+                        current_chunk = [current_chunk[-1], p] if current_chunk else [p]
+                        current_len = sum(len(x) for x in current_chunk) + 2
+                    else:
+                        current_chunk = [p]
+                        current_len = len(p)
+                else:
+                    current_chunk.append(p)
+                    current_len += len(p) + 2
+        if current_chunk:
+            chunks.append("\n\n".join(current_chunk))
+            
     elif file_type == "json":
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             data = json.load(f)
@@ -100,17 +260,22 @@ async def extract_text_from_file(file_path: str, file_type: str) -> list:
     elif file_type in ("jpg", "jpeg", "png", "webp"):
         try:
             from PIL import Image
-            img = Image.open(file_path)
-            try:
-                import pytesseract
-                text = pytesseract.image_to_string(img)
-            except Exception as ocr_err:
-                logger.warning(f"Tesseract OCR failed in dataset service: {ocr_err}. Falling back to demo OCR text.")
-                text = f"[OCR Extracted Text from Image {os.path.basename(file_path)}]\nInvoice #2024-001\nDate: January 15, 2024\nAmount: $1,250.00"
-            if text.strip():
-                chunks.append(text)
+            # Validate image corruption
+            with Image.open(file_path) as img:
+                img.verify()
+            with Image.open(file_path) as img:
+                img.load()
+                try:
+                    import pytesseract
+                    text = pytesseract.image_to_string(img)
+                except Exception as ocr_err:
+                    logger.warning(f"Tesseract OCR failed in dataset service: {ocr_err}. Falling back to demo OCR text.")
+                    text = f"[OCR Extracted Text from Image {os.path.basename(file_path)}]\nInvoice #2024-001\nDate: January 15, 2024\nAmount: $1,250.00"
+                if text.strip():
+                    chunks.append(text.strip())
         except Exception as img_err:
-            logger.error(f"Failed to extract OCR text from image: {img_err}")
+            logger.error(f"Failed to validate or extract OCR text from image: {img_err}")
+            raise Exception(f"Corrupted or invalid image file: {str(img_err)}")
     elif file_type in ("mp3", "wav", "m4a", "ogg", "flac"):
         try:
             import whisper
@@ -411,7 +576,7 @@ def validate_environment_variables():
     logger.info("========================================")
 
 async def build_index_for_dataset(dataset_doc: dict, db) -> str:
-    """Download, extract, chunk, embed, and store dataset in ChromaDB or FAISS."""
+    """Download, extract, chunk, embed, and store dataset in ChromaDB or FAISS with 10-min timeout."""
     start_time = datetime.utcnow()
     dataset_id = str(dataset_doc["_id"])
     file_name = dataset_doc.get("filename") or dataset_doc.get("file_name") or dataset_doc.get("name", "unknown")
@@ -424,20 +589,59 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         await db.rag_indexes.delete_many({"dataset_id": dataset_id})
         return ""
 
-    # 1. Update status to processing in DB
-    logger.info(f"Database Update: Changing status of dataset '{dataset_id}' to 'processing'...")
+    # Setup parameters for stages logs
+    log_params = {
+        "dataset_id": dataset_id,
+        "filename": file_name,
+        "dataset_type": file_type,
+        "file_path": dataset_doc.get("file_path"),
+        "file_size": dataset_doc.get("size_bytes") or dataset_doc.get("size", 0),
+        "worker_started": start_time.isoformat() + "Z",
+        "worker_finished": None,
+        "rows_count": None,
+        "chunks_created": None,
+        "embedding_started": None,
+        "embedding_completed": None,
+        "vector_db_insert_success": None,
+        "mongodb_update_success": None,
+        "error": None
+    }
+
+    def print_stage_log(stage_name: str):
+        logger.info(
+            f"[DATASET PROCESSING - STAGE: {stage_name}]\n"
+            f"  Dataset ID: {log_params['dataset_id']}\n"
+            f"  Filename: {log_params['filename']}\n"
+            f"  Dataset Type: {log_params['dataset_type']}\n"
+            f"  File Path: {log_params['file_path']}\n"
+            f"  File Size: {log_params['file_size']} bytes\n"
+            f"  Worker Started: {log_params['worker_started']}\n"
+            f"  Worker Finished: {log_params['worker_finished']}\n"
+            f"  Rows Count: {log_params['rows_count']}\n"
+            f"  Chunks Created: {log_params['chunks_created']}\n"
+            f"  Embedding Started: {log_params['embedding_started']}\n"
+            f"  Embedding Completed: {log_params['embedding_completed']}\n"
+            f"  Vector DB Insert Success: {log_params['vector_db_insert_success']}\n"
+            f"  MongoDB Update Success: {log_params['mongodb_update_success']}\n"
+            f"  Errors: {log_params['error']}"
+        )
+
+    # Reading File = 30%
+    logger.info(f"Database Update: Changing status of dataset '{dataset_id}' to 'reading_file'...")
     await db.datasets.update_one(
         {"_id": dataset_doc["_id"]},
-        {"$set": {"status": "processing", "error_message": None}}
+        {"$set": {
+            "status": "reading_file",
+            "progress": 30.0,
+            "currentStage": "Reading File",
+            "current_stage": "Reading File",
+            "startedAt": start_time
+        }}
     )
-    logger.info(f"Database Update: Status successfully changed to 'processing' for dataset '{dataset_id}'.")
+    log_params["mongodb_update_success"] = True
+    print_stage_log("Worker Started")
 
-
-    # 1.5 Cloud Backup Safety Net
-    # NOTE: Cloud backup is now performed synchronously during the /upload endpoint,
-    # so fresh uploads will already have gridfs_id/secure_url/s3_key set.
-    # This block is a last-resort fallback for old datasets that were uploaded before
-    # the upload-time backup was implemented, or in case the upload-time backup failed.
+    # Cloud Backup Safety Net fallback for old datasets
     fresh_exists = await db.datasets.find_one({"_id": dataset_doc["_id"]})
     has_cloud_backup = bool(
         (fresh_exists or {}).get("secure_url") or
@@ -447,24 +651,19 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
     )
     if has_cloud_backup:
         logger.info(f"Background Backup: Dataset {dataset_id} already has cloud backup. Skipping re-upload.")
-        # Update in-memory doc with latest backup fields from DB for file recovery
         if fresh_exists:
             dataset_doc.update({k: fresh_exists[k] for k in ("secure_url", "gridfs_id", "s3_key", "cloudinary_url", "public_id", "s3_url") if fresh_exists.get(k)})
     else:
-        # Fallback: attempt cloud backup now (dataset has no cloud backup yet)
         local_path = exists.get("file_path") or dataset_doc.get("file_path")
         if local_path and os.path.exists(local_path):
             backup_max_mb = int(os.environ.get("BACKUP_MAX_SIZE_MB", "200"))
             file_size_mb = os.path.getsize(local_path) / (1024 * 1024)
             if file_size_mb <= backup_max_mb:
-                logger.info(f"Background Backup: No cloud backup found for {dataset_id}. Running fallback upload ({file_size_mb:.1f}MB)...")
+                logger.info(f"Background Backup: No cloud backup found for {dataset_id}. Running fallback upload...")
                 try:
                     with open(local_path, "rb") as f:
                         file_bytes = f.read()
-                    content_type_map = {
-                        "txt": "text/plain", "csv": "text/csv", "pdf": "application/pdf",
-                        "json": "application/json", "zip": "application/zip",
-                    }
+                    content_type_map = {"txt": "text/plain", "csv": "text/csv", "pdf": "application/pdf", "json": "application/json", "zip": "application/zip"}
                     ct = content_type_map.get(file_type, "application/octet-stream")
                     up_dict = {}
                     if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY and settings.AWS_S3_BUCKET:
@@ -480,27 +679,17 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
                     if up_dict:
                         await db.datasets.update_one({"_id": dataset_doc["_id"]}, {"$set": up_dict})
                         dataset_doc.update(up_dict)
-                        logger.info(f"Background Backup (fallback): saved {list(up_dict.keys())} for dataset {dataset_id}")
-                    else:
-                        logger.warning(f"Background Backup (fallback): ALL methods failed for {dataset_id}. File is local-only.")
                 except Exception as backup_err:
-                    logger.error(f"Background Backup (fallback): unexpected error: {backup_err}", exc_info=True)
-            else:
-                logger.warning(f"Background Backup: File {file_size_mb:.1f}MB exceeds BACKUP_MAX_SIZE_MB={backup_max_mb}. Skipping fallback backup.")
-        else:
-            logger.warning(f"Background Backup: No cloud backup and no local file for dataset {dataset_id}. File is unrecoverable.")
+                    logger.error(f"Background Backup (fallback) error: {backup_err}", exc_info=True)
 
-
-
-
-    # Check if there is an index document in rag_indexes
+    # Check/Create index document in rag_indexes
     index_doc = await db.rag_indexes.find_one({"dataset_id": dataset_id})
     if index_doc:
         index_id = str(index_doc["_id"])
         index_type = index_doc.get("index_type", "chroma")
         await db.rag_indexes.update_one(
             {"_id": index_doc["_id"]},
-            {"$set": {"status": "building", "progress": 10.0, "error": None}}
+            {"$set": {"status": "building", "progress": 30.0, "error": None}}
         )
     else:
         index_type = "chroma"
@@ -513,7 +702,7 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             "index_type": index_type,
             "chunk_count": 0,
             "status": "building",
-            "progress": 10.0,
+            "progress": 30.0,
             "user_id": dataset_doc.get("user_id", ""),
             "created_at": datetime.utcnow(),
         }
@@ -528,7 +717,9 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
 
     temp_path = None
     is_temp = False
-    try:
+
+    async def do_indexing():
+        nonlocal temp_path, is_temp
         # Step 1: File Retrieval & Verification
         logger.info(f"[Step 1/6] Retrieving dataset file: {file_name}")
         try:
@@ -539,34 +730,61 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         except Exception as file_err:
             raise Exception(f"File Access Failure: Dataset file '{file_name}' could not be located or downloaded. Details: {str(file_err)}")
         
-        # Step 2: File Parsing & Metadata Extraction
+        # Step 2: Preprocessing = 50%
         logger.info("[Step 2/6] Parsing file and extracting metadata...")
+        await db.datasets.update_one(
+            {"_id": dataset_doc["_id"]},
+            {"$set": {
+                "status": "preprocessing",
+                "progress": 50.0,
+                "currentStage": "Preprocessing",
+                "current_stage": "Preprocessing"
+            }}
+        )
+        await db.rag_indexes.update_one(
+            {"_id": index_id},
+            {"$set": {"progress": 50.0}}
+        )
+        print_stage_log("Preprocessing")
+
         try:
             meta_res = await asyncio.to_thread(_process_sync, temp_path, file_type)
             logger.info("[OK] Metadata extraction completed successfully.")
         except Exception as parse_err:
             raise Exception(f"File Parsing Failure: The file format is corrupt or unsupported. Details: {str(parse_err)}")
         
-        # Intercept and route to image dataset processing pipeline if detected
         is_image_dataset = meta_res.get("metadata", {}).get("is_image_dataset", False)
         if is_image_dataset:
             from services.image_dataset_service import process_image_dataset
             await process_image_dataset(dataset_doc, temp_path, index_id, meta_res, db)
             return index_id
 
+        rows_count = meta_res.get("rows")
+        cols_count = meta_res.get("cols")
+        log_params["rows_count"] = rows_count
+        
+        # Step 3: Chunking = 70%
+        logger.info("[Step 3/6] Chunking data for vector embedding...")
+        await db.datasets.update_one(
+            {"_id": dataset_doc["_id"]},
+            {"$set": {
+                "status": "chunking",
+                "progress": 70.0,
+                "currentStage": "Chunking",
+                "current_stage": "Chunking"
+            }}
+        )
         await db.rag_indexes.update_one(
             {"_id": index_id},
-            {"$set": {"progress": 30.0}}
+            {"$set": {"progress": 70.0}}
         )
-        
-        # Step 3: Text Chunking
-        logger.info("[Step 3/6] Chunking data for vector embedding...")
+        print_stage_log("Chunking")
+
         try:
             chunks = await extract_text_from_file(temp_path, file_type)
             if not chunks or len(chunks) == 0:
                 raise Exception("Text Extraction Failure: Chunk count is 0. No text content could be parsed or extracted from the dataset.")
             
-            # Enforce max chunk limit as a safeguard
             max_chunks = int(os.environ.get("MAX_DATASET_CHUNKS", "10000"))
             if len(chunks) > max_chunks:
                 logger.warning(f"Dataset generated {len(chunks)} chunks, exceeding max limit of {max_chunks}. Truncating.")
@@ -576,10 +794,11 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         except Exception as extract_err:
             raise Exception(f"Text Extraction Failure: Failed to split dataset into text chunks. Details: {str(extract_err)}")
 
+        log_params["chunks_created"] = len(chunks)
+
         # Clear existing chunk metadata from MongoDB
         try:
             await db.dataset_chunks.delete_many({"dataset_id": dataset_id})
-            logger.info(f"Cleared existing chunk metadata in database for dataset ID: {dataset_id}")
         except Exception as clean_db_err:
             logger.warning(f"Failed to clean old chunk metadata in database: {clean_db_err}")
 
@@ -600,104 +819,57 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
                 for start_idx in range(0, len(chunk_docs), db_batch_size):
                     batch = chunk_docs[start_idx:start_idx + db_batch_size]
                     await db.dataset_chunks.insert_many(batch)
-                logger.info(f"Stored {len(chunk_docs)} chunk metadata records in database collection 'dataset_chunks'")
         except Exception as db_chunk_err:
             logger.error(f"Failed to store chunk metadata in database: {db_chunk_err}")
             raise Exception(f"Chunk Storage Failure: Failed to save chunk metadata to database. Details: {str(db_chunk_err)}")
         
-        await db.rag_indexes.update_one(
-            {"_id": index_id},
-            {"$set": {"progress": 50.0}}
-        )
-            
-        # Step 4: Embedding Model Initialization & Generation
+        # Step 4: Embedding = 90%
         logger.info("[Step 4/6] Initializing embedding model and generating vectors...")
+        await db.datasets.update_one(
+            {"_id": dataset_doc["_id"]},
+            {"$set": {
+                "status": "embedding",
+                "progress": 90.0,
+                "currentStage": "Embedding",
+                "current_stage": "Embedding"
+            }}
+        )
         await db.rag_indexes.update_one(
             {"_id": index_id},
-            {"$set": {"progress": 67.0}}
+            {"$set": {"progress": 90.0}}
         )
+        log_params["embedding_started"] = datetime.utcnow().isoformat() + "Z"
+        print_stage_log("Embedding Started")
+
         try:
             embedding_model = (index_doc or {}).get("embedding_model") or "sentence-transformers/all-MiniLM-L6-v2"
-            if not embedding_model:
-                embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
-            logger.info(f"Initializing embedding model: '{embedding_model}'...")
             embedder = await get_embedding_model_async(embedding_model)
-            logger.info("[OK] Embedding model initialized successfully.")
         except Exception as model_err:
             raise Exception(f"Embedding Model Initialization Failure: {str(model_err)}")
 
-        # Step 5: Connecting to Vector Store & Initializing Collection
-        logger.info(f"[Step 5/6] Connecting to vector store ({index_type}) and initializing collection...")
+        # Step 5: Connecting to Vector Store
         try:
             store = VectorStore(backend=index_type, collection_name=index_id)
-            # Delete any existing store collection first to prevent duplicate/orphaned chunks on reprocessing!
             try:
                 await store.delete_store()
             except Exception as del_err:
                 logger.warning(f"Failed to delete existing store collection {index_id}: {del_err}")
-            logger.info(f"Initializing VectorStore backend '{index_type}' for collection '{index_id}'...")
             await store.ensure_initialized()
-            
-            # Active Connection Verification
-            if index_type == "chroma":
-                if hasattr(store, "_client") and store._client is not None:
-                    logger.info("[OK] Verification: ChromaDB connection is active.")
-                else:
-                    raise Exception("ChromaDB client connection is inactive or failed to initialize.")
-                
-                if hasattr(store, "_collection") and store._collection is not None:
-                    logger.info(f"[OK] Verification: ChromaDB collection '{index_id}' exists and is ready.")
-                else:
-                    raise Exception(f"ChromaDB collection '{index_id}' does not exist or failed to create.")
-            elif index_type == "faiss":
-                if hasattr(store, "_index") and store._index is not None:
-                    logger.info("[OK] Verification: FAISS index is active and ready.")
-                else:
-                    raise Exception("FAISS index is inactive or failed to initialize.")
         except Exception as db_init_err:
             raise Exception(f"Vector Database Initialization Failure: Failed to establish store connection. Details: {str(db_init_err)}")
-
-        # Cloudinary verification check when required
-        cloudinary_configured = bool(settings.CLOUDINARY_CLOUD_NAME and settings.CLOUDINARY_API_KEY and settings.CLOUDINARY_API_SECRET)
-        if cloudinary_configured:
-            logger.info("Verification: Cloudinary configuration is active. Checking dataset 'cloudinary_url'...")
-            if not dataset_doc.get("cloudinary_url"):
-                logger.warning(f"Verification WARNING: Dataset '{dataset_id}' does not have a 'cloudinary_url' despite Cloudinary being configured.")
-            else:
-                logger.info(f"Verification: Dataset 'cloudinary_url' is present: {dataset_doc.get('cloudinary_url')}")
-        else:
-            logger.info("Verification: Cloudinary configuration is empty; Cloudinary URL is not required.")
 
         # Batch Processing: Embeddings Generation and Vector store insertions
         batch_size = getattr(settings, "EMBEDDING_BATCH_SIZE", 20)
         total_chunks = len(chunks)
-        embedding_model = (index_doc or {}).get("embedding_model") or "sentence-transformers/all-MiniLM-L6-v2"
-        if not embedding_model:
-            embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
         total_batches = (total_chunks + batch_size - 1) // batch_size
-        logger.info(f"Starting batched embedding generation and vector store insertion (batch size: {batch_size}, total: {total_chunks} chunks, batches: {total_batches})...")
-
-        # Pre-build metadatas and IDs
-        metadatas = []
-        for idx, chunk in enumerate(chunks):
-            metadatas.append({
-                "document_id": dataset_id,
-                "chunk_id": f"{index_id}_{idx}",
-                "source_file": file_name,
-                "chunk_text": chunk
-            })
+        
+        metadatas = [{"document_id": dataset_id, "chunk_id": f"{index_id}_{idx}", "source_file": file_name, "chunk_text": chunk} for idx, chunk in enumerate(chunks)]
         ids = [f"{index_id}_{idx}" for idx in range(len(chunks))]
 
         for i in range(0, total_chunks, batch_size):
-            # Verify dataset still exists before processing next batch
             exists = await db.datasets.find_one({"_id": dataset_doc["_id"]})
             if not exists:
-                logger.warning(f"Aborting indexing: dataset {dataset_id} was deleted by the user during batch processing")
-                await db.rag_indexes.delete_many({"dataset_id": dataset_id})
-                try:
-                    await store.delete_store()
-                except Exception:
-                    pass
+                logger.warning(f"Aborting indexing: dataset {dataset_id} was deleted by the user")
                 return ""
 
             batch_chunks = chunks[i:i+batch_size]
@@ -710,18 +882,8 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             batch_embeds = None
             completed_batches = i // batch_size + 1
             
-            # Log structured batch metadata exactly as requested
-            logger.info(
-                f"[EMBEDDING LOG] datasetId: {dataset_id} | "
-                f"chunkCount: {total_chunks} | "
-                f"embeddingModel: {embedding_model} | "
-                f"batchCount: {total_batches} | "
-                f"completedBatches: {completed_batches}"
-            )
-            
             for attempt in range(max_attempts):
                 try:
-                    logger.info(f"Generating embeddings for batch {completed_batches}/{total_batches} (chunks {i} to {i+len(batch_chunks)}) - Attempt {attempt + 1}/{max_attempts}...")
                     if asyncio.iscoroutinefunction(embedder.encode):
                         batch_embeds = await embedder.encode(batch_chunks)
                     else:
@@ -730,61 +892,41 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
                         batch_embeds = batch_embeds.tolist()
                     break
                 except Exception as embed_err:
-                    logger.warning(f"Failed embedding generation at batch {i} (attempt {attempt + 1}/{max_attempts}): {embed_err}")
                     if attempt == max_attempts - 1:
                         raise Exception(f"Embedding Generation Failure: Failed to generate vectors for batch {i}-{i+len(batch_chunks)} after {max_attempts} attempts. Details: {str(embed_err)}")
                     await asyncio.sleep(backoff_delay * (2 ** attempt))
 
-            # 2. Verify embeddings shape is valid
+            # 2. Verify embeddings shape
             if not isinstance(batch_embeds, list) or len(batch_embeds) != len(batch_chunks):
                 raise Exception(f"Embedding Shape Verification Failure: Expected {len(batch_chunks)} vectors, got {len(batch_embeds) if isinstance(batch_embeds, list) else type(batch_embeds)}")
             
-            for v_idx, vec in enumerate(batch_embeds):
-                if not isinstance(vec, list) or len(vec) == 0:
-                    raise Exception(f"Embedding Shape Verification Failure: Vector at index {v_idx} is empty or not a list.")
-            
-            dim = len(batch_embeds[0])
-            logger.info(f"[OK] Verification: Embedding shape for batch is valid: [{len(batch_embeds)}, {dim}]")
-
             # 3. Vector store insertion for batch (with retries)
             for attempt in range(max_attempts):
                 try:
-                    logger.info(f"Inserting batch {i//batch_size + 1}/{(total_chunks + batch_size - 1)//batch_size} into vector store ({index_type}) - Attempt {attempt + 1}/{max_attempts}...")
-                    prev_count = await store.count()
                     await store.add_documents(batch_chunks, batch_embeds, batch_metadatas, batch_ids)
-                    col_count = await store.count()
-                    logger.info(f"[OK] Verification: Batch insert complete. Collection count grew from {prev_count} to {col_count} (expected +{len(batch_chunks)})")
                     break
                 except Exception as db_err:
-                    logger.warning(f"Failed vector store insertion at batch {i} (attempt {attempt + 1}/{max_attempts}): {db_err}")
                     if attempt == max_attempts - 1:
-                        raise Exception(f"Vector Database Insertion Failure: Failed to store batch vectors in ChromaDB/FAISS after {max_attempts} attempts. Details: {str(db_err)}")
+                        raise Exception(f"Vector Database Insertion Failure: Failed to store batch vectors after {max_attempts} attempts. Details: {str(db_err)}")
                     await asyncio.sleep(backoff_delay * (2 ** attempt))
 
-            # Update progress (scale Embedding linearly from 67.0% to 85.0%)
-            progress = 67.0 + (min(i + batch_size, total_chunks) / total_chunks) * 18.0
+            # Scale progress slightly within the 90%-95% range
+            progress = 90.0 + (min(i + batch_size, total_chunks) / total_chunks) * 5.0
+            await db.datasets.update_one(
+                {"_id": dataset_doc["_id"]},
+                {"$set": {"progress": round(progress, 1)}}
+            )
             await db.rag_indexes.update_one(
                 {"_id": index_id},
                 {"$set": {"progress": round(progress, 1)}}
             )
             
-            await asyncio.sleep(0.02)
-
-            # Force garbage collection to free memory during large batch indexing
-            del batch_chunks
-            del batch_embeds
-            del batch_ids
-            del batch_metadatas
             import gc
             gc.collect()
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except ImportError:
-                pass
 
-        logger.info(f"[OK] All {total_chunks} chunks successfully embedded and stored in {index_type} (final count: {col_count})")
+        log_params["embedding_completed"] = datetime.utcnow().isoformat() + "Z"
+        log_params["vector_db_insert_success"] = True
+        print_stage_log("Embedding Completed")
 
         # Step 6: Post-processing (EDA stats & preview generation)
         logger.info("[Step 6/6] Post-processing (generating EDA stats and preview)...")
@@ -793,7 +935,6 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             from api.routes.datasets import _generate_preview
             eda_res = await asyncio.to_thread(_eda_sync, temp_path, file_type)
             preview_res = await asyncio.to_thread(_generate_preview, temp_path, file_type)
-            logger.info("[OK] EDA stats and preview precomputed.")
         except Exception as post_err:
             logger.warning(f"Post-processing warning: Failed to generate EDA/preview: {post_err}")
             eda_res = {}
@@ -801,12 +942,14 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         
         processing_time = (datetime.utcnow() - start_time).total_seconds()
         
-        # 6. Update status to indexed in DB
-        logger.info(f"Database Update: Changing status of dataset '{dataset_id}' to 'indexed'...")
+        # 6. Update status to completed in DB
         await db.datasets.update_one(
             {"_id": dataset_doc["_id"]},
             {"$set": {
-                "status": "indexed",
+                "status": "completed",
+                "progress": 100,
+                "currentStage": "Completed",
+                "current_stage": "Completed",
                 "rows": meta_res.get("rows"),
                 "cols": meta_res.get("cols"),
                 "columns": meta_res.get("columns", []),
@@ -814,24 +957,29 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
                 "stats": eda_res,
                 "preview": preview_res,
                 "processed_at": datetime.utcnow(),
+                "completedAt": datetime.utcnow(),
+                "completed_at": datetime.utcnow(),
                 "error_message": None,
+                "error": None,
                 "recovery_attempts": 0,
+                "chunks": len(chunks),
                 "chunk_count": len(chunks),
+                "embeddingCount": len(chunks),
                 "embedding_count": len(chunks),
+                "processingTime": processing_time,
                 "processing_time": processing_time
             }}
         )
-        logger.info(f"Database Update: Status successfully changed to 'indexed' for dataset '{dataset_id}'.")
         
-        # 7. Update status of RAG index in DB
-        logger.info(f"Database Update: Changing status of RAG index '{index_id}' to 'ready'...")
         await db.rag_indexes.update_one(
             {"_id": index_id},
             {"$set": {"status": "ready", "progress": 100.0, "chunk_count": len(chunks), "error": None}}
         )
-        logger.info(f"Database Update: RAG index '{index_id}' status successfully changed to 'ready'.")
         
-        # Trigger auto API key generation
+        log_params["worker_finished"] = datetime.utcnow().isoformat() + "Z"
+        log_params["mongodb_update_success"] = True
+        print_stage_log("Worker Finished")
+        
         user_id = dataset_doc.get("user_id")
         if user_id:
             try:
@@ -839,15 +987,37 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             except Exception as key_err:
                 logger.error(f"Failed to auto-generate API Key: {key_err}")
 
-        logger.info(f"Successfully indexed dataset {dataset_id} with {len(chunks)} chunks using {index_type}.")
         return index_id
+
+    try:
+        # Wrap execution in a 10-minute (600s) timeout
+        res_idx = await asyncio.wait_for(do_indexing(), timeout=600.0)
+        return res_idx
     except Exception as e:
         import traceback
         full_stack = traceback.format_exc()
-        logger.error(f"Indexing failed for dataset {dataset_id}:\n{full_stack}")
-        
         error_msg = str(e)
-        
+        if isinstance(e, asyncio.TimeoutError):
+            error_msg = "Processing Timeout"
+            
+        logger.error(f"Indexing failed for dataset {dataset_id}:\n{full_stack}")
+        log_params["error"] = error_msg
+        log_params["worker_finished"] = datetime.utcnow().isoformat() + "Z"
+        print_stage_log("Errors")
+
+        # Rollback database and vector store chunks
+        logger.warning(f"Rollback: Cleaning up partial database assets for failed dataset '{dataset_id}'...")
+        try:
+            await db.dataset_chunks.delete_many({"dataset_id": dataset_id})
+        except Exception as rollback_db_err:
+            logger.error(f"Rollback: Failed to delete dataset_chunks: {rollback_db_err}")
+            
+        try:
+            store = VectorStore(backend=index_type, collection_name=index_id)
+            await store.delete_store()
+        except Exception as rollback_vs_err:
+            logger.error(f"Rollback: Failed to delete vector store: {rollback_vs_err}")
+
         # Determine error source
         error_source = "UNKNOWN"
         err_msg_lower = error_msg.lower()
@@ -859,34 +1029,39 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             error_source = "GRIDFS"
         elif "local" in err_msg_lower:
             error_source = "LOCAL"
-            
+
         processing_time = (datetime.utcnow() - start_time).total_seconds()
         
-        logger.info(f"Database Update: Changing status of dataset '{dataset_id}' to 'failed', error_source '{error_source}' and saving error message: {error_msg}...")
         await db.datasets.update_one(
             {"_id": dataset_doc["_id"]},
             {"$set": {
-                "status": "failed", 
+                "status": "failed",
+                "progress": 0.0,
+                "currentStage": "Failed",
+                "current_stage": "Failed",
                 "error_message": error_msg,
+                "error": error_msg,
                 "error_source": error_source,
+                "completedAt": datetime.utcnow(),
+                "completed_at": datetime.utcnow(),
+                "chunks": 0,
                 "chunk_count": 0,
+                "embeddingCount": 0,
                 "embedding_count": 0,
+                "processingTime": processing_time,
                 "processing_time": processing_time
             }}
         )
-        logger.info(f"Database Update: Status successfully changed to 'failed' for dataset '{dataset_id}'.")
-        
-        logger.info(f"Database Update: Changing status of RAG index '{index_id}' to 'failed'...")
+
         await db.rag_indexes.update_one(
             {"_id": index_id},
             {"$set": {
-                "status": "failed", 
-                "progress": 0.0, 
+                "status": "failed",
+                "progress": 0.0,
                 "error": error_msg,
                 "error_source": error_source
             }}
         )
-        logger.info(f"Database Update: RAG index '{index_id}' status successfully changed to 'failed'.")
         raise
     finally:
         # Close the ChromaDB client to flush the SQLite database and release locks

@@ -182,7 +182,8 @@ async def ensure_dataset_indexed(dataset_id: str, db) -> str:
         )
 
     # If the index is already building/processing, raise a clean error
-    if dataset.get("status") in ("processing", "building") or (index_doc and index_doc.get("status") in ("processing", "building", "indexing")):
+    active_states = {"uploaded", "saved", "reading_file", "preprocessing", "chunking", "embedding", "embedded", "processing", "building", "indexing"}
+    if dataset.get("status") in active_states or (index_doc and index_doc.get("status") in active_states):
         raise HTTPException(
             status_code=400,
             detail="This dataset is currently being indexed. Please try again in a few seconds."

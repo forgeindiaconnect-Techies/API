@@ -32,7 +32,7 @@ def fmt_dataset(d: dict) -> dict:
         "size_bytes": d.get("size_bytes", 0),
         "rows": d.get("rows"),
         "cols": d.get("cols"),
-        "status": "ready" if status in ("ready", "indexed") else status,
+        "status": "ready" if status in ("ready", "indexed", "completed") else status,
         "user_id": d.get("user_id", ""),
         "created_at": d.get("created_at", d.get("created_at", datetime.utcnow())),
         "processed_at": d.get("processed_at"),
@@ -186,8 +186,82 @@ async def upload_dataset(
         if not os.path.exists(local_path) or not os.path.isfile(local_path) or os.path.getsize(local_path) != file_size:
             raise Exception("File stream write validation failed: File on disk is missing or size is inconsistent.")
             
+        if file_size == 0:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty (0 bytes).")
+            
         logger.info(f"Successfully streamed upload locally: {local_path} ({file_size} bytes)")
+        
+        # 1.5. Validate CSV, Excel, ZIP, Text, Image, PDF, or DOCX files before processing
+        if ext in ("csv", "txt", "md", "json"):
+            with open(local_path, "rb") as f:
+                header = f.read(1024)
+                if b"\x00" in header:
+                    raise HTTPException(status_code=400, detail="Invalid text file: Binary data detected.")
+                    
+        if ext == "csv":
+            import pandas as pd
+            validated = False
+            for enc in ["utf-8", "latin-1", "utf-8-sig", "cp1252"]:
+                try:
+                    pd.read_csv(local_path, nrows=5, encoding=enc)
+                    validated = True
+                    break
+                except Exception:
+                    continue
+            if not validated:
+                try:
+                    pd.read_csv(local_path, nrows=5)
+                except Exception as csv_err:
+                    raise HTTPException(status_code=400, detail=f"Invalid or corrupt CSV file: {str(csv_err)}")
+        elif ext in ("xlsx", "xls"):
+            import pandas as pd
+            try:
+                pd.read_excel(local_path, nrows=5)
+            except Exception as excel_err:
+                raise HTTPException(status_code=400, detail=f"Invalid or corrupt Excel file: {str(excel_err)}")
+        elif ext == "zip":
+            import zipfile
+            if not zipfile.is_zipfile(local_path):
+                raise HTTPException(status_code=400, detail="Invalid or corrupt ZIP archive.")
+            try:
+                with zipfile.ZipFile(local_path, "r") as zf:
+                    bad_file = zf.testzip()
+                    if bad_file is not None:
+                        raise Exception(f"First corrupt file inside zip: {bad_file}")
+            except Exception as zip_err:
+                raise HTTPException(status_code=400, detail=f"Corrupt or invalid ZIP archive: {str(zip_err)}")
+        elif ext in ("jpg", "jpeg", "png", "webp"):
+            from PIL import Image
+            try:
+                with Image.open(local_path) as img:
+                    img.verify()
+                with Image.open(local_path) as img:
+                    img.load()
+            except Exception as img_err:
+                raise HTTPException(status_code=400, detail=f"Corrupt or invalid Image file: {str(img_err)}")
+        elif ext == "pdf":
+            import PyPDF2
+            try:
+                with open(local_path, "rb") as f:
+                    reader = PyPDF2.PdfReader(f)
+                    if len(reader.pages) == 0:
+                        raise Exception("PDF file has 0 pages.")
+                    _ = reader.pages[0].extract_text()
+            except Exception as pdf_err:
+                raise HTTPException(status_code=400, detail=f"Corrupt or invalid PDF file: {str(pdf_err)}")
+        elif ext == "docx":
+            from docx import Document
+            try:
+                Document(local_path)
+            except Exception as docx_err:
+                raise HTTPException(status_code=400, detail=f"Corrupt or invalid DOCX file: {str(docx_err)}")
+                
     except HTTPException:
+        if os.path.exists(local_path):
+            try:
+                os.remove(local_path)
+            except Exception:
+                pass
         raise
     except Exception as e:
         logger.error(f"Failed to stream and validate file locally: {e}", exc_info=True)
@@ -226,7 +300,7 @@ async def upload_dataset(
         "file_type": ext,
         "size_bytes": file_size,
         "file_hash": file_hash,
-        "status": "processing",
+        "status": "uploaded",
         "user_id": user_id_str,
         "created_at": datetime.utcnow(),
     }
@@ -337,12 +411,26 @@ async def upload_dataset(
         )
 
     # 5. Queue indexing task (Try Celery first, fallback to FastAPI BackgroundTasks)
-    try:
-        from workers.tasks import rebuild_dataset_index_task
-        rebuild_dataset_index_task.delay(doc["_id"])
-        logger.info(f"Queued initial indexing task via Celery for dataset {doc['_id']}")
-    except Exception as celery_err:
-        logger.warning(f"Failed to queue task via Celery: {celery_err}. Falling back to FastAPI BackgroundTasks.")
+    redis_available = False
+    if settings.REDIS_URL:
+        try:
+            import redis
+            client = redis.from_url(settings.REDIS_URL, socket_timeout=0.5, socket_connect_timeout=0.5)
+            client.ping()
+            redis_available = True
+        except Exception as redis_err:
+            logger.warning(f"Redis is not available: {redis_err}. Fallback to BackgroundTasks.")
+            
+    if redis_available:
+        try:
+            from workers.tasks import rebuild_dataset_index_task
+            rebuild_dataset_index_task.delay(doc["_id"])
+            logger.info(f"Queued initial indexing task via Celery for dataset {doc['_id']}")
+        except Exception as celery_err:
+            logger.warning(f"Failed to queue task via Celery: {celery_err}. Falling back to FastAPI BackgroundTasks.")
+            from services.dataset_service import build_index_for_dataset
+            background_tasks.add_task(build_index_for_dataset, doc, db)
+    else:
         from services.dataset_service import build_index_for_dataset
         background_tasks.add_task(build_index_for_dataset, doc, db)
 
@@ -545,12 +633,26 @@ async def reprocess_dataset(
     )
     
     # Reprocessing a failed/completed dataset should rebuild its RAG index as well to make it fully functional.
-    try:
-        from workers.tasks import rebuild_dataset_index_task
-        rebuild_dataset_index_task.delay(str(d["_id"]))
-        logger.info(f"Queued reprocess indexing task via Celery for dataset {d['_id']}")
-    except Exception as celery_err:
-        logger.warning(f"Failed to queue task via Celery: {celery_err}. Falling back to FastAPI BackgroundTasks.")
+    redis_available = False
+    if settings.REDIS_URL:
+        try:
+            import redis
+            client = redis.from_url(settings.REDIS_URL, socket_timeout=0.5, socket_connect_timeout=0.5)
+            client.ping()
+            redis_available = True
+        except Exception as redis_err:
+            logger.warning(f"Redis is not available: {redis_err}. Fallback to BackgroundTasks.")
+            
+    if redis_available:
+        try:
+            from workers.tasks import rebuild_dataset_index_task
+            rebuild_dataset_index_task.delay(str(d["_id"]))
+            logger.info(f"Queued reprocess indexing task via Celery for dataset {d['_id']}")
+        except Exception as celery_err:
+            logger.warning(f"Failed to queue task via Celery: {celery_err}. Falling back to FastAPI BackgroundTasks.")
+            from services.dataset_service import build_index_for_dataset
+            background_tasks.add_task(build_index_for_dataset, d, db)
+    else:
         from services.dataset_service import build_index_for_dataset
         background_tasks.add_task(build_index_for_dataset, d, db)
     
@@ -634,12 +736,52 @@ async def get_dataset_status(
     error_message = d.get("error_message")
     error_source = d.get("error_source") or "UNKNOWN"
 
+    # Timeout check: if the status is active and elapsed time > 10 minutes, fail the dataset
+    if status in ("uploaded", "saved", "reading_file", "preprocessing", "chunking", "embedding", "embedded", "processing"):
+        created_at = d.get("created_at")
+        if created_at:
+            if isinstance(created_at, str):
+                try:
+                    created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                except Exception:
+                    created_at = None
+            if created_at:
+                elapsed = (datetime.utcnow() - created_at).total_seconds()
+                if elapsed > 600:  # 10 minutes
+                    timeout_msg = "Processing Timeout"
+                    status = "failed"
+                    error_message = timeout_msg
+                    error_source = "UNKNOWN"
+                    # Update database records so it stops polling and shows failure permanently
+                    try:
+                        await db.datasets.update_one(
+                            {"_id": d["_id"]},
+                            {"$set": {
+                                "status": "failed",
+                                "progress": 0.0,
+                                "error_message": timeout_msg,
+                                "error": timeout_msg,
+                                "error_source": "UNKNOWN"
+                            }}
+                        )
+                        await db.rag_indexes.update_many(
+                            {"dataset_id": dataset_id},
+                            {"$set": {
+                                "status": "failed",
+                                "progress": 0.0,
+                                "error": timeout_msg,
+                                "error_source": "UNKNOWN"
+                            }}
+                        )
+                    except Exception as upd_err:
+                        logger.error(f"Failed to update timed out dataset: {upd_err}")
+
     if index_doc:
         index_status = index_doc.get("status")
         index_progress = index_doc.get("progress", 0.0)
         index_error = index_doc.get("error")
 
-        if status == "processing":
+        if status in ("processing", "preprocessing", "uploaded", "saved", "reading_file", "chunking", "extracted", "embedding", "embedded"):
             progress = index_progress if index_progress is not None else 50
             if index_status == "failed":
                 status = "failed"
@@ -655,7 +797,7 @@ async def get_dataset_status(
     else:
         if status in ("completed", "ready", "indexed"):
             progress = 100
-        elif status == "processing":
+        elif status in ("processing", "preprocessing", "uploaded", "saved", "reading_file", "chunking", "extracted", "embedding", "embedded"):
             progress = 50
         elif status in ("failed", "error"):
             progress = 0
@@ -663,7 +805,56 @@ async def get_dataset_status(
         else:
             progress = 10
 
-    # If the status is failed, return the structured JSON format as specified
+    # Map status to stage label
+    stage_map = {
+        "uploaded": "Uploaded",
+        "saved": "Saved",
+        "reading_file": "Reading File",
+        "preprocessing": "Preprocessing",
+        "chunking": "Chunking",
+        "embedding": "Embedding",
+        "embedded": "Embedded",
+        "completed": "Completed",
+        "ready": "Completed",
+        "indexed": "Completed",
+        "failed": "Failed",
+        "error": "Failed",
+        "processing": "Processing"
+    }
+    current_stage = d.get("current_stage") or d.get("currentStage") or stage_map.get(status, status.replace("_", " ").title())
+
+    # Calculate elapsed time
+    elapsed_time = 0.0
+    started_at = d.get("startedAt") or d.get("started_at") or d.get("created_at")
+    if started_at:
+        if isinstance(started_at, str):
+            try:
+                started_at = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            except Exception:
+                started_at = None
+        if started_at:
+            completed_at = d.get("completedAt") or d.get("completed_at")
+            if completed_at:
+                if isinstance(completed_at, str):
+                    try:
+                        completed_at = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+                    except Exception:
+                        completed_at = None
+            if completed_at:
+                elapsed_time = (completed_at - started_at).total_seconds()
+            else:
+                now = datetime.utcnow()
+                if started_at.tzinfo is not None:
+                    from datetime import timezone
+                    now = datetime.now(timezone.utc)
+                elapsed_time = (now - started_at).total_seconds()
+
+    # Calculate estimated remaining time
+    estimated_time_remaining = 0.0
+    if progress > 0 and progress < 100:
+        estimated_time_remaining = (elapsed_time / progress) * (100 - progress)
+
+    # Determine error source if failed
     if status == "failed":
         if error_source not in ("LOCAL", "CLOUDINARY", "AWS_S3", "GRIDFS", "UNKNOWN"):
             err_msg_lower = (error_message or "").lower()
@@ -678,27 +869,36 @@ async def get_dataset_status(
             else:
                 error_source = "UNKNOWN"
 
-        return {
-            "status": "failed",
-            "dataset_id": dataset_id,
-            "error_source": error_source,
-            "error": error_message or "Unknown indexing error",
-            "recovery_attempts": ["local", "cloudinary", "s3"],
-            "chunk_count": d.get("chunk_count", 0),
-            "embedding_count": d.get("embedding_count", 0),
-            "processing_time": d.get("processing_time", 0.0),
-        }
-
-    return {
+    response_data = {
+        "datasetId": dataset_id,
+        "dataset_id": dataset_id,
         "status": status,
         "progress": progress,
+        "currentStage": current_stage,
+        "current_stage": current_stage,
+        "rows": d.get("rows"),
+        "cols": d.get("cols"),
+        "chunks": d.get("chunks") or d.get("chunk_count", 0),
+        "chunk_count": d.get("chunks") or d.get("chunk_count", 0),
+        "elapsedTime": round(elapsed_time, 2) if elapsed_time else 0.0,
+        "elapsed_time": round(elapsed_time, 2) if elapsed_time else 0.0,
+        "estimatedTimeRemaining": round(estimated_time_remaining, 2) if estimated_time_remaining else 0.0,
+        "estimated_time_remaining": round(estimated_time_remaining, 2) if estimated_time_remaining else 0.0,
+        "error": error_message,
         "error_message": error_message,
-        "chunk_count": d.get("chunk_count", 0),
-        "embedding_count": d.get("embedding_count", 0),
-        "processing_time": d.get("processing_time", 0.0),
         "mongodb_connected": mongodb_connected,
-        "chromadb_connected": chromadb_connected
+        "chromadb_connected": chromadb_connected,
+        "embedding_count": d.get("embedding_count") or d.get("embeddingCount", 0),
+        "processing_time": d.get("processing_time") or d.get("processingTime", 0.0),
     }
+
+    if status == "failed":
+        response_data.update({
+            "error_source": error_source,
+            "recovery_attempts": ["local", "cloudinary", "s3", "gridfs"]
+        })
+
+    return response_data
 
 
 @router.get("/{dataset_id}/eda")

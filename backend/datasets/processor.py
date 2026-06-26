@@ -41,17 +41,37 @@ def _process_sync(file_path: str, file_type: str) -> Dict[str, Any]:
 def _process_csv(path: str) -> Dict[str, Any]:
     import pandas as pd
     
-    encodings = ["utf-8", "latin-1", "utf-8-sig", "cp1252"]
+    # Auto-detect encoding
+    detected_enc = None
+    try:
+        import chardet
+        with open(path, "rb") as f:
+            rawdata = f.read(20000)
+            result = chardet.detect(rawdata)
+            detected_enc = result.get("encoding")
+            if detected_enc:
+                logger.info(f"Detected CSV encoding: {detected_enc}")
+    except Exception as e:
+        logger.warning(f"Chardet failed to detect CSV encoding: {e}")
+
+    encodings = [detected_enc] if detected_enc else []
+    encodings += ["utf-8", "latin-1", "utf-8-sig", "cp1252"]
     df = None
+    
     for enc in encodings:
+        if not enc:
+            continue
         try:
-            df = pd.read_csv(path, encoding=enc)
+            df = pd.read_csv(path, encoding=enc, on_bad_lines="skip")
             break
         except Exception:
             continue
             
     if df is None:
-        df = pd.read_csv(path)
+        df = pd.read_csv(path, on_bad_lines="skip")
+
+    # Remove completely empty rows
+    df = df.dropna(how="all")
         
     return {
         "rows": len(df),
@@ -140,13 +160,45 @@ def _process_pdf(path: str) -> Dict[str, Any]:
 
 
 def _process_text(path: str) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        content = f.read()
+    import re
+    
+    # Auto-detect encoding
+    detected_enc = None
+    try:
+        import chardet
+        with open(path, "rb") as f:
+            rawdata = f.read(50000)
+            result = chardet.detect(rawdata)
+            detected_enc = result.get("encoding")
+            if detected_enc:
+                logger.info(f"Detected text encoding: {detected_enc}")
+    except Exception as e:
+        logger.warning(f"Chardet failed to detect text encoding: {e}")
+
+    encodings = [detected_enc] if detected_enc else []
+    encodings += ["utf-8", "utf-8-sig", "latin-1", "cp1252"]
+    content = None
+    
+    for enc in encodings:
+        if not enc:
+            continue
+        try:
+            with open(path, "r", encoding=enc) as f:
+                content = f.read()
+            break
+        except Exception:
+            continue
+
+    if content is None:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+
+    # Split into paragraphs, remove empty paragraphs
+    paragraphs = [p.strip() for p in re.split(r'\n\s*\n', content) if p.strip()]
     lines = content.splitlines()
     words = len(content.split())
     
     # Calculate average sentence length
-    import re
     sentences = re.split(r'[.!?]+', content)
     sentence_lengths = [len(s.strip().split()) for s in sentences if s.strip().split()]
     avg_sentence_len = round(sum(sentence_lengths) / len(sentence_lengths), 1) if sentence_lengths else 0
@@ -169,11 +221,12 @@ def _process_text(path: str) -> Dict[str, Any]:
     language_name = lang_mapping.get(detected_lang, "English")
 
     return {
-        "rows": len(lines),
+        "rows": len(paragraphs),
         "cols": None,
         "columns": [],
         "metadata": {
             "lines": len(lines),
+            "paragraphs": len(paragraphs),
             "words": words,
             "chars": len(content),
             "avg_sentence_len": avg_sentence_len,
@@ -187,7 +240,23 @@ def _process_docx(path: str) -> Dict[str, Any]:
         import docx
         import re
         doc = docx.Document(path)
-        paragraphs = [p.text for p in doc.paragraphs if p.text]
+        
+        # Extract paragraphs preserving bold/italic runs as Markdown formatting
+        paragraphs = []
+        for p in doc.paragraphs:
+            p_text = ""
+            for run in p.runs:
+                text = run.text
+                if not text:
+                    continue
+                if run.bold:
+                    text = f"**{text}**"
+                if run.italic:
+                    text = f"*{text}*"
+                p_text += text
+            if p_text.strip():
+                paragraphs.append(p_text.strip())
+                
         content = "\n".join(paragraphs)
         words = len(content.split())
         
@@ -265,8 +334,11 @@ def _process_image(path: str) -> Dict[str, Any]:
     try:
         from PIL import Image
         with Image.open(path) as img:
+            img.verify()
+        with Image.open(path) as img:
+            img.load()
             return {
-                "rows": None,
+                "rows": 1,
                 "cols": None,
                 "columns": [],
                 "metadata": {
@@ -276,8 +348,9 @@ def _process_image(path: str) -> Dict[str, Any]:
                     "format": img.format,
                 }
             }
-    except Exception:
-        return {"rows": None, "cols": None, "columns": [], "metadata": {}}
+    except Exception as e:
+        logger.error(f"Image validation/decoding failed for '{path}': {e}")
+        raise ValueError(f"Corrupted or invalid image: {str(e)}")
 
 
 def _process_audio(path: str) -> Dict[str, Any]:

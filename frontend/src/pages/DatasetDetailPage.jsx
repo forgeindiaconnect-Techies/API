@@ -106,7 +106,7 @@ export default function DatasetDetailPage() {
     let active = true;
     let secondsElapsed = 0;
     let consecutiveErrors = 0;
-    let currentInterval = 2000; // start with 2s
+    let currentInterval = 3000; // Poll every 3 seconds
 
     const pollStatus = async () => {
       if (!active) return;
@@ -117,10 +117,10 @@ export default function DatasetDetailPage() {
         
         // Reset error states on successful response
         consecutiveErrors = 0;
-        currentInterval = 2000;
+        currentInterval = 3000;
         setPollingError(null);
         
-        const currentStatus = res.data.status;
+        const currentStatus = (res.data.status || '').toLowerCase();
         
         if (currentStatus === 'completed' || currentStatus === 'ready' || currentStatus === 'indexed') {
           setReprocessing(false);
@@ -128,7 +128,7 @@ export default function DatasetDetailPage() {
           return;
         } else if (currentStatus === 'failed' || currentStatus === 'error') {
           setReprocessing(false);
-          setDataset(prev => prev ? { ...prev, status: 'failed', error_message: res.data.error_message || 'Processing failed' } : null);
+          setDataset(prev => prev ? { ...prev, status: 'failed', error_message: res.data.error_message || res.data.error || 'Processing failed' } : null);
           return;
         }
       } catch (err) {
@@ -136,7 +136,7 @@ export default function DatasetDetailPage() {
         consecutiveErrors += 1;
         console.error(`Error polling status (failures: ${consecutiveErrors}):`, err);
         
-        // Exponential backoff: double the interval up to 10 seconds
+        // Exponential backoff on connection errors: double the interval up to 10 seconds
         currentInterval = Math.min(currentInterval * 2, 10000);
         
         const errMsg = err.response?.data?.detail || err.message || "Connection error";
@@ -159,7 +159,8 @@ export default function DatasetDetailPage() {
       timeoutId = setTimeout(pollStatus, currentInterval);
     };
 
-    const isProcessing = dataset && (['processing', 'uploaded', 'extracted', 'preprocessing', 'embedding', 'embedded'].includes(dataset.status) || reprocessing);
+    const statusLower = (dataset?.status || '').toLowerCase();
+    const isProcessing = dataset && (['processing', 'uploaded', 'saved', 'reading_file', 'chunking', 'extracted', 'preprocessing', 'embedding', 'embedded'].includes(statusLower) || reprocessing);
     if (isProcessing) {
       setPollingError(null);
       timeoutId = setTimeout(pollStatus, currentInterval);
@@ -294,7 +295,8 @@ Generate a structured response with these EXACT headings:
     )
   }
 
-  const isProcessingState = ['processing', 'uploaded', 'extracted', 'preprocessing', 'embedding', 'embedded'].includes(dataset.status) || reprocessing;
+  const statusLower = (dataset.status || '').toLowerCase();
+  const isProcessingState = ['processing', 'uploaded', 'saved', 'reading_file', 'chunking', 'extracted', 'preprocessing', 'embedding', 'embedded'].includes(statusLower) || reprocessing;
   if (isProcessingState) {
     const steps = [
       { id: 'uploaded', label: 'Uploaded' },
@@ -304,7 +306,7 @@ Generate a structured response with these EXACT headings:
       { id: 'embedded', label: 'Embedded' },
       { id: 'ready', label: 'Ready' }
     ];
-    const currentStepIdx = steps.findIndex(s => s.id === dataset.status);
+    const currentStepIdx = steps.findIndex(s => s.id === (dataset.status || '').toLowerCase());
     const isImageDataset = dataset.name?.toLowerCase().endsWith('.zip') || dataset.metadata?.is_image_dataset || dataset.metadata?.type === 'image_dataset';
 
     return (

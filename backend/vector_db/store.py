@@ -464,6 +464,20 @@ def get_embedding_model(model_name: str = "sentence-transformers/all-MiniLM-L6-v
     os.environ["HF_HUB_HTTP_TIMEOUT"] = "15"
     os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
+    # Check if Hugging Face Hub is reachable
+    local_files_only = False
+    try:
+        import httpx
+        with httpx.Client(timeout=1.0) as client:
+            resp = client.head("https://huggingface.co", follow_redirects=True)
+            if resp.status_code != 200:
+                local_files_only = True
+    except Exception:
+        local_files_only = True
+
+    if local_files_only:
+        logger.warning("Hugging Face Hub is unreachable or offline. Setting local_files_only=True to load cached models only and prevent hangs.")
+
     max_attempts = 2
     for attempt in range(max_attempts):
         try:
@@ -477,7 +491,7 @@ def get_embedding_model(model_name: str = "sentence-transformers/all-MiniLM-L6-v
                 logger.warning(f"Failed to set PyTorch num_threads: {torch_err}")
                 
             from sentence_transformers import SentenceTransformer
-            _shared_embedding_model = SentenceTransformer(model_name, device="cpu")
+            _shared_embedding_model = SentenceTransformer(model_name, device="cpu", local_files_only=local_files_only)
             
             # Clean up any unused references/memory immediately after loading
             gc.collect()

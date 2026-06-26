@@ -71,8 +71,8 @@ async def run_startup_recovery():
 
         rebuild_queue = []
 
-        # 1. Check for stale "processing" status datasets
-        stale_datasets_cursor = db.datasets.find({"status": "processing"})
+        # 1. Check for stale "processing", "preprocessing", or "uploaded" status datasets
+        stale_datasets_cursor = db.datasets.find({"status": {"$in": ["uploaded", "saved", "reading_file", "preprocessing", "chunking", "embedding", "embedded", "processing"]}})
         async for dataset in stale_datasets_cursor:
             dataset_id = str(dataset["_id"])
             dataset_name = dataset.get('name') or dataset.get('file_name') or 'unknown'
@@ -188,7 +188,7 @@ async def run_startup_recovery():
                 continue
                 
             dataset = await db.datasets.find_one({"_id": get_id_query(dataset_id)})
-            if not dataset or dataset.get("status") not in ["indexed", "ready"]:
+            if not dataset or dataset.get("status") not in ["indexed", "ready", "completed"]:
                 logger.info(f"Startup recovery: Cleaned up stale 'building' index {index_doc['_id']} (associated dataset status is not active).")
                 await db.rag_indexes.update_one(
                     {"_id": index_doc["_id"]},
@@ -204,7 +204,7 @@ async def run_startup_recovery():
         # 3. Check for indexed or ready datasets with empty ChromaDB collections
         # Only queue datasets that have a CLOUD backup — local-only datasets cannot be recovered
         # after an ephemeral disk wipe (Render restart).
-        datasets_cursor = db.datasets.find({"status": {"$in": ["indexed", "ready"]}})
+        datasets_cursor = db.datasets.find({"status": {"$in": ["indexed", "ready", "completed"]}})
         async for dataset in datasets_cursor:
             dataset_id = str(dataset["_id"])
             if dataset_id in rebuild_queue:

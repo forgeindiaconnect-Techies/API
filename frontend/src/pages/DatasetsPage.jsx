@@ -82,26 +82,30 @@ export default function DatasetsPage() {
 
   // Poll status of processing/pending datasets to update UI reactively
   useEffect(() => {
-    const processing = datasets.filter(d => d.status === 'processing' || d.status === 'pending')
+    const processing = datasets.filter(d => {
+      const s = (d.status || '').toLowerCase()
+      return ['processing', 'pending', 'uploaded', 'saved', 'reading_file', 'preprocessing', 'chunking', 'embedding', 'embedded', 'extracted'].includes(s)
+    })
     if (processing.length === 0) return
 
     const interval = setInterval(async () => {
       for (const ds of processing) {
         try {
           const { data } = await datasetAPI.getStatus(ds.id)
-          if (data.status === 'indexed' || data.status === 'ready') {
+          const currentStatus = (data.status || '').toLowerCase()
+          if (['indexed', 'ready', 'completed'].includes(currentStatus)) {
             const detailRes = await datasetAPI.get(ds.id)
             updateDataset(ds.id, {
               ...detailRes.data,
               status: 'ready'
             })
             toast.success(`Dataset "${ds.name}" is processed and ready!`)
-          } else if (data.status === 'failed') {
+          } else if (currentStatus === 'failed' || currentStatus === 'error') {
             updateDataset(ds.id, {
               status: 'error',
-              error_message: data.error || 'Indexing task failed.'
+              error_message: data.error || data.error_message || 'Indexing task failed.'
             })
-            toast.error(`Dataset "${ds.name}" processing failed: ${data.error || 'Indexing task failed.'}`)
+            toast.error(`Dataset "${ds.name}" processing failed: ${data.error || data.error_message || 'Indexing task failed.'}`)
           }
         } catch (err) {
           console.error(`Error polling status for dataset ${ds.id}:`, err)
