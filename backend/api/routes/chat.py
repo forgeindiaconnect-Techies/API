@@ -121,8 +121,26 @@ async def send_message(
     u_result = await db.messages.insert_one(user_msg)
     user_msg["_id"] = str(u_result.inserted_id)
 
+    # Load chat history from DB (including current user message)
+    cursor = db.messages.find({"conversation_id": conversation_id}).sort("created_at", -1).limit(10)
+    history_docs = []
+    async for doc in cursor:
+        history_docs.append(doc)
+    history_docs.reverse()
+    chat_history = [{"role": doc["role"], "content": doc["content"]} for doc in history_docs]
+
     # Get AI response
-    ai_content = await get_ollama_response(data.content, conversation_id, db)
+    from services.chat_service import query_dataset_rag
+    rag_res = await query_dataset_rag(
+        index_id=None,
+        question=data.content,
+        top_k=3,
+        db=db,
+        model=None,
+        chat_history=chat_history,
+        user_id=str(current_user["_id"])
+    )
+    ai_content = rag_res["answer"]
 
     # Save AI message
     ai_msg = {
@@ -237,15 +255,27 @@ async def stream_message(
 
     async def generate_response():
         try:
-            # Check if context was selected
-            if not data.dataset_id and not index_id:
-                answer_content = "Please select a dataset file from the 'Add Context' dropdown above to begin searching."
-                sources = []
-            else:
-                from services.chat_service import query_dataset_rag
-                rag_res = await query_dataset_rag(index_id, data.content, top_k=3, db=db, model=data.model)
-                answer_content = rag_res["answer"]
-                sources = rag_res.get("sources", [])
+            # 2. Load chat history from DB (including current user message)
+            cursor = db.messages.find({"conversation_id": conversation_id}).sort("created_at", -1).limit(data.context_window or 10)
+            history_docs = []
+            async for doc in cursor:
+                history_docs.append(doc)
+            history_docs.reverse()
+            chat_history = [{"role": doc["role"], "content": doc["content"]} for doc in history_docs]
+
+            # 3. Call query_dataset_rag which handles optional indexes, name memory, and history.
+            from services.chat_service import query_dataset_rag
+            rag_res = await query_dataset_rag(
+                index_id=index_id,
+                question=data.content,
+                top_k=3,
+                db=db,
+                model=data.model,
+                chat_history=chat_history,
+                user_id=str(current_user["_id"])
+            )
+            answer_content = rag_res["answer"]
+            sources = rag_res.get("sources", [])
 
             # Stream response chunk by chunk for visual streaming effect
             words = answer_content.split(" ")

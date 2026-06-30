@@ -1,4 +1,5 @@
 import logging
+from typing import Optional, List, Dict, Any
 from database import get_db
 from auth.utils import get_id_query
 from vector_db.store import VectorStore, get_embedding_model, get_embedding_model_async
@@ -60,130 +61,35 @@ def generate_fallback_answer(question: str, valid_sources: list) -> str:
     return f"According to the dataset, {joined_text}"
 
 
-async def query_dataset_rag(index_id: str, question: str, top_k: int = 5, db = None, model: str = None) -> dict:
+async def generate_chat_response(messages: list, db, model: str = None, valid_sources: list = None) -> str:
     """
-    Retrieve matching context chunks from vector DB (Chroma/FAISS) and answer the user question.
-    Falls back to a smart local context matcher if Ollama/OpenAI is offline.
+    Unified chat generator that interfaces with LLMs (Custom, Ollama, Gemini, OpenAI).
+    Falls back gracefully if models are offline.
     """
-    # Detect simple greetings/chitchat/thanks to avoid returning forced database answers
-    clean_question = question.strip().lower().rstrip("?.!")
-    greetings = {"hi", "hello", "hey", "greetings", "good morning", "good afternoon", "howdy", "hola", "yo"}
-    if clean_question in greetings:
-        return {"answer": "Hello! How can I help you today?", "sources": []}
-        
-    how_are_you = {"how are you", "how is it going", "how's it going", "how are you doing", "how do you do"}
-    if clean_question in how_are_you:
-        return {"answer": "I'm doing great, thank you! How can I help you analyze your dataset today?", "sources": []}
-
-    thanks = {"thanks", "thank you", "thank you so much", "ty", "cheers"}
-    if clean_question in thanks:
-        return {"answer": "You're very welcome! Let me know if you have any other questions.", "sources": []}
-    # 1. Fetch index and dataset documents from DB
-    index = await db.rag_indexes.find_one({"_id": get_id_query(index_id)})
-    if not index:
-        return {"answer": "Index not found.", "sources": []}
-
-    # Verify indexing status
-    status = index.get("status", "building")
-    if status in ("building", "processing"):
-        return {"answer": "Dataset indexing in progress...", "sources": []}
-    
-    logger.info("[OK] Dataset indexed")
-        
-    dataset_id = index.get("dataset_id")
-    dataset = await db.datasets.find_one({"_id": get_id_query(dataset_id)})
-    source_name = dataset.get("file_name") or dataset.get("name", "unknown")
-
-    # 2. Get active embedder model (tiered fallback)
-    try:
-        embedder = await get_embedding_model_async(index.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2"))
-    except Exception as e:
-        logger.error(f"Failed to load embedding model: {e}")
-        return {"answer": "Embedding generation failed.", "sources": []}
-        
-    is_local_search = embedder.__class__.__name__ == "HashingTFIDFEmbedder"
-
-    # 3. Generate query embedding
-    import asyncio
-    try:
-        if hasattr(embedder, "encode"):
-            if asyncio.iscoroutinefunction(embedder.encode):
-                query_emb = await embedder.encode(question)
-            else:
-                query_emb = await asyncio.to_thread(embedder.encode, question)
-        else:
-            query_emb = []
-            
-        if hasattr(query_emb, "tolist"):
-            query_emb = query_emb.tolist()
-        logger.info("[OK] Embeddings generated")
-    except Exception as e:
-        logger.error(f"Embedding generation failed: {e}")
-        return {"answer": "Embedding generation failed.", "sources": []}
-
-    # 4. Search dynamic persistent store (ChromaDB / FAISS)
-    index_type = index.get("index_type", "chroma")
-    try:
-        store = VectorStore(backend=index_type, collection_name=index_id)
-        logger.info("[OK] Chroma populated")
-        raw_results = await store.query(query_emb, top_k=top_k)
-    except Exception as e:
-        logger.error(f"Vector search failed: {e}")
-        return {"answer": "No relevant context found.", "sources": []}
-
-    sources = []
-    for r in raw_results:
-        sources.append({
-            "content": r["document"],
-            "score": float(r["score"]),
-            "source": r["metadata"].get("source_file") or r["metadata"].get("source", source_name),
-            "metadata": r["metadata"]
-        })
-
-    # Sort sources by similarity score descending
-    sources.sort(key=lambda x: x["score"], reverse=True)
-
-    # Log retrieved chunks count and similarity scores
-    logger.info(f"Retrieved chunks count: {len(sources)}")
-    logger.info(f"Similarity scores: {[s['score'] for s in sources]}")
-
-    # Filter with similarity score threshold: 0.0 for TF-IDF keyword matching (fallback responder filters via exact text overlap), 0.30 for semantic
-    threshold = 0.0 if is_local_search else 0.30
-    valid_sources = [s for s in sources if s["score"] >= threshold]
-
-    logger.info(f"Valid chunks count (above threshold {threshold}): {len(valid_sources)}")
-
-    if not valid_sources:
-        logger.info("LLM response status: Low Confidence. Returning: 'No relevant information found in the dataset'")
-        return {
-            "answer": "No relevant information found in the dataset",
-            "sources": []
-        }
-
-    logger.info("[OK] Retrieval successful")
-
-    # Construct clean prompt exactly as requested
-    retrieved_chunks = "\n\n".join([f"Source: {s['source']}\nContent: {s['content']}" for s in valid_sources])
-    
-    prompt = f"""Context:
-{retrieved_chunks}
-
-Question:
-{question}
-
-Instructions:
-Answer only using the context.
-Do not return raw chunks.
-Generate a natural language response."""
-
-    # Log prompt sent to LLM
-    logger.info(f"Prompt sent to LLM:\n{prompt}")
-    logger.info("[OK] Context sent to LLM")
-
-    answer_text = ""
     llm_connected = False
+    answer_text = ""
 
-    # Check if the requested model is a custom trained decoder model
+    # Extract last user prompt
+    last_prompt = ""
+    for msg in reversed(messages):
+        if msg["role"] == "user":
+            last_prompt = msg["content"]
+            break
+
+    # Format prompt for custom model / Gemini
+    formatted_prompt = ""
+    for msg in messages:
+        role = msg["role"]
+        content = msg["content"]
+        if role == "system":
+            formatted_prompt += f"System: {content}\n\n"
+        elif role == "user":
+            formatted_prompt += f"User: {content}\n\n"
+        elif role == "assistant":
+            formatted_prompt += f"Assistant: {content}\n\n"
+    formatted_prompt += "Assistant: "
+
+    # 1. Custom trained model inference
     is_custom_model = False
     custom_model_id = None
     if model:
@@ -199,17 +105,16 @@ Generate a natural language response."""
 
     if is_custom_model and custom_model_id:
         try:
-            logger.info(f"RAG: Routing generation to custom trained decoder LLM (ID: {custom_model_id})")
+            logger.info(f"Routing to custom model {custom_model_id}")
             from models import PredictRequest
             from api.routes.models_router import perform_model_inference
             
             predict_req = PredictRequest(
                 model_id=custom_model_id,
-                input={"prompt": prompt},
-                parameters={"max_new_tokens": 100, "temperature": 0.7, "top_k": 20}
+                input={"prompt": formatted_prompt},
+                parameters={"max_new_tokens": 150, "temperature": 0.7, "top_k": 20}
             )
             
-            # Create a mock Request object for verification context
             class DummyRequest:
                 class State:
                     api_key = None
@@ -221,82 +126,67 @@ Generate a natural language response."""
                 http_request=DummyRequest(),
                 db=db
             )
-            
             ans = pred_response.prediction.get("text", "").strip()
             if ans:
                 answer_text = ans
                 llm_connected = True
-                logger.info("LLM response status: Success (Custom Model RAG)")
-                logger.info("[OK] LLM response received")
-        except Exception as custom_err:
-            logger.error(f"Custom model RAG generation failed: {custom_err}. Accessing standard LLMs...")
+                logger.info("Custom model prediction successful")
+        except Exception as e:
+            logger.error(f"Custom model inference failed: {e}")
 
-    # A: Try Ollama first
+    # 2. Ollama Chat
     if not llm_connected:
         global _ollama_online, _last_ollama_check
         current_time = time.time()
         if not _ollama_online and (current_time - _last_ollama_check > 300):
-            # Retry connection status check every 5 minutes
             _ollama_online = True
-            logger.info("Retrying Ollama connection check...")
 
         if _ollama_online:
             try:
                 client = AsyncClient(
                     host=settings.OLLAMA_BASE_URL,
                     headers={"bypass-tunnel-reminder": "true"},
-                    timeout=1.5  # Fast 1.5 seconds connection timeout
+                    timeout=1.5
                 )
-                res = await client.generate(
-                    model=model if model and not is_custom_model else settings.DEFAULT_MODEL or "llama3",
-                    prompt=prompt,
-                    stream=False
+                ollama_model = model if model and not is_custom_model else settings.DEFAULT_MODEL or "llama3"
+                res = await client.chat(
+                    model=ollama_model,
+                    messages=messages,
+                    options={"temperature": 0.7}
                 )
-                answer_text = res.get("response", "").strip()
+                answer_text = res.get("message", {}).get("content", "").strip()
                 if answer_text:
                     llm_connected = True
-                    logger.info("LLM response status: Success (Ollama)")
-                    logger.info("[OK] LLM response received")
+                    logger.info("Ollama response generated successfully")
             except Exception as ollama_err:
                 _ollama_online = False
                 _last_ollama_check = current_time
-                logger.warning(f"Ollama connection failed (offline): {ollama_err}. Bypassing for subsequent requests. Trying fallback...")
-        else:
-            logger.info("Ollama is cached offline. Skipping connection attempt and trying fallbacks immediately.")
-        
-    # B: Try Google Gemini fallback if Ollama is unavailable (only when external APIs are enabled)
+                logger.warning(f"Ollama chat failed: {ollama_err}")
+
+    # 3. Google Gemini fallback
     if not llm_connected and settings.USE_EXTERNAL_APIS:
         import os
         gemini_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY")
-        if gemini_key and not gemini_key.startswith("your-"):
+        if gemini_key and not gemini_key.startswith("your-") and not gemini_key.startswith("AQ."):
             try:
-                logger.info("Attempting Google Gemini fallback (gemini-2.5-flash)...")
                 import google.generativeai as genai
                 genai.configure(api_key=gemini_key)
                 model_instance = genai.GenerativeModel("gemini-2.5-flash")
                 
                 try:
-                    logger.info("Calling Gemini API asynchronously...")
-                    res = await model_instance.generate_content_async(prompt)
+                    res = await model_instance.generate_content_async(formatted_prompt)
                     answer_text = res.text.strip()
-                except Exception as gemini_async_err:
-                    logger.warning(f"Gemini async call failed: {gemini_async_err}. Trying synchronous call in executor...")
-                    res = await asyncio.to_thread(model_instance.generate_content, prompt)
+                except Exception:
+                    res = await asyncio.to_thread(model_instance.generate_content, formatted_prompt)
                     answer_text = res.text.strip()
                 
                 if answer_text:
                     llm_connected = True
-                    logger.info("LLM response status: Success (Gemini)")
-                    logger.info("[OK] LLM response received")
+                    logger.info("Gemini response generated successfully")
             except Exception as gemini_err:
-                logger.error(f"Google Gemini fallback failed for RAG: {gemini_err}")
-                logger.info(f"LLM response status: Failed (Gemini error: {gemini_err})")
-        else:
-            logger.info("LLM response status: GEMINI_API_KEY is missing or placeholder. Skipping Gemini fallback.")
-    elif not llm_connected and not settings.USE_EXTERNAL_APIS:
-        logger.info("LLM response status: Gemini fallback skipped (USE_EXTERNAL_APIS=false).")
+                logger.error(f"Gemini generation failed: {gemini_err}")
 
-    # C: Try OpenAI fallback if Gemini is unavailable or fails (only when external APIs are enabled)
+    # 4. OpenAI fallback
     if not llm_connected and settings.USE_EXTERNAL_APIS:
         import os
         openai_key = settings.OPENAI_API_KEY or os.environ.get("OPENAI_API_KEY")
@@ -305,27 +195,164 @@ Generate a natural language response."""
                 openai_client = AsyncOpenAI(api_key=openai_key)
                 res = await openai_client.chat.completions.create(
                     model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=messages,
+                    temperature=0.7,
                     stream=False
                 )
                 answer_text = res.choices[0].message.content.strip()
                 if answer_text:
                     llm_connected = True
-                    logger.info("LLM response status: Success (OpenAI)")
-                    logger.info("[OK] LLM response received")
+                    logger.info("OpenAI response generated successfully")
             except Exception as openai_err:
-                logger.error(f"OpenAI fallback failed for RAG: {openai_err}")
-                logger.info(f"LLM response status: Failed (OpenAI error: {openai_err})")
-        else:
-            logger.info("LLM response status: OpenAI API key is missing or invalid. Skipping OpenAI fallback.")
-    elif not llm_connected and not settings.USE_EXTERNAL_APIS:
-        logger.info("LLM response status: OpenAI fallback skipped (USE_EXTERNAL_APIS=false).")
+                logger.error(f"OpenAI generation failed: {openai_err}")
 
-    # D: If all are unavailable, fall back to Dataset-Only RAG Mode with natural language responder
+    # 5. Local/Offline fallback responder
     if not llm_connected:
-        logger.info("LLM response status: Fallback (Offline contextual responder)")
-        answer_text = generate_fallback_answer(question, valid_sources)
-        logger.info("[OK] LLM response received")
+        if valid_sources:
+            logger.info("LLM offline. Generating local keyword matches from retrieved sources.")
+            answer_text = generate_fallback_answer(last_prompt, valid_sources)
+        else:
+            # Check user name request
+            if "what is my name" in last_prompt.lower() or "who am i" in last_prompt.lower():
+                for m in messages:
+                    if m["role"] == "system" and "User Profile Memory" in m["content"]:
+                        for line in m["content"].split("\n"):
+                            if line.startswith("- Name:"):
+                                name = line.replace("- Name:", "").strip()
+                                return f"Your name is {name}."
+                return "I don't know your name yet. You can tell me by saying 'I am [name]'."
+            
+            # Simple chitchat fallbacks
+            clean_prompt = last_prompt.strip().lower().rstrip("?.!")
+            if clean_prompt in {"hi", "hello", "hey", "greetings"}:
+                return "Hello! How can I help you today?"
+            elif clean_prompt in {"how are you", "how's it going"}:
+                return "I'm doing great, thank you! How are you?"
+            elif clean_prompt in {"thanks", "thank you"}:
+                return "You're very welcome!"
+                
+            return "I'm currently running in offline fallback mode and couldn't reach the AI model."
+
+    return answer_text
+
+
+async def query_dataset_rag(
+    index_id: Optional[str],
+    question: str,
+    top_k: int = 5,
+    db = None,
+    model: str = None,
+    chat_history: list = None,
+    user_id: str = None
+) -> dict:
+    """
+    Retrieve matching context chunks from vector DB if available.
+    Generates response using chat history, user memory, and optionally RAG context.
+    Falls back to normal LLM conversation if RAG has low confidence.
+    """
+    import asyncio
+    
+    # 1. Fetch user's memory (e.g. name) and extract/save if stated in the current question
+    user_name = None
+    if user_id and db:
+        try:
+            import re
+            from datetime import datetime
+            # First, check if user states their name in the current question
+            patterns = [
+                r"\bi\s+am\s+([A-Za-z]+)",
+                r"\bi'm\s+([A-Za-z]+)",
+                r"\bmy\s+name\s+is\s+([A-Za-z]+)"
+            ]
+            name_found = None
+            for pattern in patterns:
+                match = re.search(pattern, question, re.IGNORECASE)
+                if match:
+                    name_found = match.group(1).strip().capitalize()
+                    break
+            
+            if name_found:
+                await db.user_memory.update_one(
+                    {"user_id": str(user_id)},
+                    {"$set": {"name": name_found, "updated_at": datetime.utcnow()}},
+                    upsert=True
+                )
+                user_name = name_found
+                logger.info(f"Extracted and saved name '{name_found}' for user_id '{user_id}'")
+            else:
+                user_mem = await db.user_memory.find_one({"user_id": str(user_id)})
+                if user_mem:
+                    user_name = user_mem.get("name")
+        except Exception as e:
+            logger.warning(f"Failed to fetch or save user memory: {e}")
+
+    valid_sources = []
+    source_name = "unknown"
+
+    # 2. Fetch RAG context if index_id is provided
+    if index_id and db:
+        try:
+            index = await db.rag_indexes.find_one({"_id": get_id_query(index_id)})
+            if index:
+                status = index.get("status", "building")
+                if status not in ("building", "processing"):
+                    dataset_id = index.get("dataset_id")
+                    dataset = await db.datasets.find_one({"_id": get_id_query(dataset_id)})
+                    if dataset:
+                        source_name = dataset.get("file_name") or dataset.get("name", "unknown")
+
+                    embedder = await get_embedding_model_async(index.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2"))
+                    is_local_search = embedder.__class__.__name__ == "HashingTFIDFEmbedder"
+
+                    if hasattr(embedder, "encode"):
+                        if asyncio.iscoroutinefunction(embedder.encode):
+                            query_emb = await embedder.encode(question)
+                        else:
+                            query_emb = await asyncio.to_thread(embedder.encode, question)
+                    else:
+                        query_emb = []
+                        
+                    if hasattr(query_emb, "tolist"):
+                        query_emb = query_emb.tolist()
+
+                    index_type = index.get("index_type", "chroma")
+                    store = VectorStore(backend=index_type, collection_name=index_id)
+                    raw_results = await store.query(query_emb, top_k=top_k)
+
+                    sources = []
+                    for r in raw_results:
+                        sources.append({
+                            "content": r["document"],
+                            "score": float(r["score"]),
+                            "source": r["metadata"].get("source_file") or r["metadata"].get("source", source_name),
+                            "metadata": r["metadata"]
+                        })
+
+                    sources.sort(key=lambda x: x["score"], reverse=True)
+
+                    threshold = 0.0 if is_local_search else 0.30
+                    valid_sources = [s for s in sources if s["score"] >= threshold]
+                    logger.info(f"RAG search found {len(valid_sources)} valid sources above threshold {threshold}")
+        except Exception as e:
+            logger.error(f"RAG search error: {e}", exc_info=True)
+
+    # 3. Construct system prompt
+    system_prompt = "You are a helpful AI assistant. You behave like ChatGPT."
+    if user_name:
+        system_prompt += f"\nUser Profile Memory:\n- Name: {user_name}\nAlways use this name when asked about their name or who they are."
+
+    if valid_sources:
+        retrieved_chunks = "\n\n".join([f"Source: {s['source']}\nContent: {s['content']}" for s in valid_sources])
+        system_prompt += f"\n\nUse the following context from the uploaded dataset to answer the user's question. If the question is not related to the context, answer using your general knowledge.\n\nContext:\n{retrieved_chunks}"
+
+    # 4. Prepare message list
+    if not chat_history:
+        chat_history = [{"role": "user", "content": question}]
+
+    messages = [{"role": "system", "content": system_prompt}] + chat_history
+
+    # 5. Generate LLM response
+    answer_text = await generate_chat_response(messages, db, model, valid_sources)
 
     from models import SearchResult
     pydantic_sources = [
@@ -341,3 +368,4 @@ Generate a natural language response."""
         "answer": answer_text,
         "sources": pydantic_sources
     }
+

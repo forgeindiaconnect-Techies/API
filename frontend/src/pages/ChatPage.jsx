@@ -360,9 +360,9 @@ export default function ChatPage() {
                 style={{ background: 'var(--accent-muted)' }}>
                 <Bot size={22} style={{ color: 'var(--accent-primary)' }} />
               </div>
-              <p className="font-semibold" style={{ color: 'var(--text-primary)' }}>Dataset-Only RAG Search</p>
+              <p className="font-semibold" style={{ color: 'var(--text-primary)' }}>Personal AI Chat</p>
               <p className="text-sm max-w-xs" style={{ color: 'var(--text-muted)' }}>
-                Please select a dataset file from the <strong>Add Context</strong> dropdown above to begin searching and chatting.
+                Ask any question! You can also select a dataset from the <strong>Add Context</strong> dropdown above to chat with your files.
               </p>
             </div>
           ) : (

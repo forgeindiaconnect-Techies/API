@@ -186,6 +186,11 @@ async def create_indexes():
     except Exception as e:
         logger.error(f"Failed to create conversations indexes: {e}")
 
+    try:
+        await db.user_memory.create_index([("user_id", ASCENDING)], unique=True)
+    except Exception as e:
+        logger.error(f"Failed to create user_memory indexes: {e}")
+
     logger.info("Database indexes creation completed")
 
 
