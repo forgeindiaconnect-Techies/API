@@ -164,10 +164,10 @@ async def generate_chat_response(messages: list, db, model: str = None, valid_so
                 logger.warning(f"Ollama chat failed: {ollama_err}")
 
     # 3. Google Gemini fallback
-    if not llm_connected and settings.USE_EXTERNAL_APIS:
+    if not llm_connected:
         import os
         gemini_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY")
-        if gemini_key and not gemini_key.startswith("your-") and not gemini_key.startswith("AQ."):
+        if gemini_key and not gemini_key.startswith("your-"):
             try:
                 import google.generativeai as genai
                 genai.configure(api_key=gemini_key)
@@ -187,7 +187,7 @@ async def generate_chat_response(messages: list, db, model: str = None, valid_so
                 logger.error(f"Gemini generation failed: {gemini_err}")
 
     # 4. OpenAI fallback
-    if not llm_connected and settings.USE_EXTERNAL_APIS:
+    if not llm_connected:
         import os
         openai_key = settings.OPENAI_API_KEY or os.environ.get("OPENAI_API_KEY")
         if openai_key and not openai_key.startswith("sk-..."):
