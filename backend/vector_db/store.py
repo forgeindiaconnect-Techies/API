@@ -341,25 +341,27 @@ class MockVectorCollection:
 class GeminiEmbedder:
     """Google Gemini embedding wrapper compatible with the sentence-transformers encode API"""
     def __init__(self, api_key: str):
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
+        from google import genai
+        self.client = genai.Client(api_key=api_key)
         self.model = "models/gemini-embedding-001"
 
     def encode(self, texts, **kwargs):
         import numpy as np
-        import google.generativeai as genai
+        from google.genai import types
         
         is_single = isinstance(texts, str)
         if is_single:
             texts = [texts]
             
         try:
-            response = genai.embed_content(
+            response = self.client.models.embed_content(
                 model=self.model,
-                content=texts,
-                task_type="retrieval_document"
+                contents=texts,
+                config=types.EmbedContentConfig(
+                    task_type="RETRIEVAL_DOCUMENT"
+                )
             )
-            embeddings = response.get("embedding", [])
+            embeddings = [emb.values for emb in response.embeddings] if response.embeddings else []
             
             res = np.array(embeddings, dtype="float32")
             if is_single:
@@ -491,7 +493,16 @@ def get_embedding_model(model_name: str = "sentence-transformers/all-MiniLM-L6-v
                 logger.warning(f"Failed to set PyTorch num_threads: {torch_err}")
                 
             from sentence_transformers import SentenceTransformer
-            _shared_embedding_model = SentenceTransformer(model_name, device="cpu", local_files_only=local_files_only)
+            try:
+                # Try passing local_files_only directly
+                _shared_embedding_model = SentenceTransformer(model_name, device="cpu", local_files_only=local_files_only)
+            except TypeError:
+                try:
+                    # Try passing local_files_only inside model_kwargs
+                    _shared_embedding_model = SentenceTransformer(model_name, device="cpu", model_kwargs={"local_files_only": local_files_only})
+                except TypeError:
+                    # Load without local_files_only parameter
+                    _shared_embedding_model = SentenceTransformer(model_name, device="cpu")
             
             # Clean up any unused references/memory immediately after loading
             gc.collect()

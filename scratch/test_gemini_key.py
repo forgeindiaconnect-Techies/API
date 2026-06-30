@@ -16,12 +16,14 @@ async def main():
         return
         
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        from google import genai
+        client = genai.Client(api_key=settings.GEMINI_API_KEY)
         
         print("Calling generate_content synchronous...")
-        response = model.generate_content("Hello, write a single test sentence.")
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents="Hello, write a single test sentence."
+        )
         print(f"Success! Response: {response.text}")
     except Exception as e:
         print(f"Error testing Gemini key: {e}")

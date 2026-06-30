@@ -169,15 +169,21 @@ async def generate_chat_response(messages: list, db, model: str = None, valid_so
         gemini_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY")
         if gemini_key and not gemini_key.startswith("your-"):
             try:
-                import google.generativeai as genai
-                genai.configure(api_key=gemini_key)
-                model_instance = genai.GenerativeModel("gemini-2.5-flash")
+                from google import genai
+                client = genai.Client(api_key=gemini_key)
                 
                 try:
-                    res = await model_instance.generate_content_async(formatted_prompt)
+                    res = await client.aio.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=formatted_prompt
+                    )
                     answer_text = res.text.strip()
                 except Exception:
-                    res = await asyncio.to_thread(model_instance.generate_content, formatted_prompt)
+                    res = await asyncio.to_thread(
+                        client.models.generate_content,
+                        model="gemini-2.5-flash",
+                        contents=formatted_prompt
+                    )
                     answer_text = res.text.strip()
                 
                 if answer_text:

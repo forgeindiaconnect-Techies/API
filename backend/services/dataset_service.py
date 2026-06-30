@@ -802,7 +802,7 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         except Exception as clean_db_err:
             logger.warning(f"Failed to clean old chunk metadata in database: {clean_db_err}")
 
-        # Store new chunks metadata in MongoDB
+        # Store new chunks metadata in S3 (fallback to MongoDB if S3 fails)
         try:
             chunk_docs = []
             for idx, chunk in enumerate(chunks):
@@ -812,16 +812,32 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
                     "chunk_id": f"{index_id}_{idx}",
                     "source_file": file_name,
                     "chunk_text": chunk,
-                    "created_at": datetime.utcnow()
+                    "created_at": datetime.utcnow().isoformat() + "Z"
                 })
+            
+            s3_success = False
             if chunk_docs:
+                try:
+                    from services.s3_service import upload_chunks_to_s3
+                    chunks_s3_key = await upload_chunks_to_s3(chunk_docs, dataset_id)
+                    await db.datasets.update_one(
+                        {"_id": dataset_doc["_id"]},
+                        {"$set": {"chunks_s3_key": chunks_s3_key}}
+                    )
+                    s3_success = True
+                    logger.info(f"Successfully stored {len(chunk_docs)} chunks in AWS S3 with key '{chunks_s3_key}'.")
+                except Exception as s3_err:
+                    logger.warning(f"AWS S3 chunks storage failed: {s3_err}. Falling back to MongoDB storage.")
+            
+            if not s3_success and chunk_docs:
                 db_batch_size = 1000
                 for start_idx in range(0, len(chunk_docs), db_batch_size):
                     batch = chunk_docs[start_idx:start_idx + db_batch_size]
                     await db.dataset_chunks.insert_many(batch)
-        except Exception as db_chunk_err:
-            logger.error(f"Failed to store chunk metadata in database: {db_chunk_err}")
-            raise Exception(f"Chunk Storage Failure: Failed to save chunk metadata to database. Details: {str(db_chunk_err)}")
+                logger.info(f"Successfully stored {len(chunk_docs)} chunks in MongoDB dataset_chunks.")
+        except Exception as chunk_err:
+            logger.error(f"Failed to store chunk metadata: {chunk_err}")
+            raise Exception(f"Chunk Storage Failure: Failed to save chunk metadata. Details: {str(chunk_err)}")
         
         # Step 4: Embedding = 90%
         logger.info("[Step 4/6] Initializing embedding model and generating vectors...")
@@ -1011,6 +1027,12 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
             await db.dataset_chunks.delete_many({"dataset_id": dataset_id})
         except Exception as rollback_db_err:
             logger.error(f"Rollback: Failed to delete dataset_chunks: {rollback_db_err}")
+            
+        try:
+            from services.s3_service import delete_chunks_from_s3
+            await delete_chunks_from_s3(dataset_id)
+        except Exception as rollback_s3_err:
+            logger.error(f"Rollback: Failed to delete S3 chunks: {rollback_s3_err}")
             
         try:
             store = VectorStore(backend=index_type, collection_name=index_id)

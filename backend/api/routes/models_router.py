@@ -295,10 +295,12 @@ async def run_fallback_predict(prompt_text: str, db) -> str:
         import os
         gemini_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY")
         if gemini_key and not gemini_key.startswith("your-"):
-            import google.generativeai as genai
-            genai.configure(api_key=gemini_key)
-            model_instance = genai.GenerativeModel("gemini-2.5-flash")
-            res = await model_instance.generate_content_async(prompt_text)
+            from google import genai
+            client = genai.Client(api_key=gemini_key)
+            res = await client.aio.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt_text
+            )
             ans = res.text.strip()
             if ans:
                 logger.info("Predict Fallback: Success (Gemini)")

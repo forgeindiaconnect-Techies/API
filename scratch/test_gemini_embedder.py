@@ -13,8 +13,8 @@ def test_gemini_embedder():
     print("=== Testing Gemini Embeddings Integration ===")
     
     # 1. Initialize embedding model
-    print("Initializing embedding model via get_embedding_model()...")
-    embedder = get_embedding_model()
+    print("Initializing GeminiEmbedder directly...")
+    embedder = GeminiEmbedder(api_key=settings.GEMINI_API_KEY)
     
     print(f"Loaded embedder class: {embedder.__class__.__name__}")
     assert isinstance(embedder, GeminiEmbedder), f"Expected GeminiEmbedder, got {type(embedder)}"

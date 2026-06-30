@@ -516,6 +516,14 @@ async def delete_dataset(dataset_id: str, current_user=Depends(get_current_user)
         except Exception as e:
             logger.error(f"Failed to delete AWS S3 file {s3_key}: {e}")
 
+    # 3.7 Delete chunks from AWS S3
+    try:
+        from services.s3_service import delete_chunks_from_s3
+        await delete_chunks_from_s3(dataset_id_str)
+        logger.info(f"Deleted AWS S3 chunks for dataset {dataset_id}")
+    except Exception as e:
+        logger.error(f"Failed to delete AWS S3 chunks for dataset {dataset_id}: {e}")
+
     # 4. Delete the dataset document from MongoDB
     await db.datasets.delete_one({"_id": d["_id"]})
     logger.info(f"Successfully deleted dataset document {dataset_id_str} from db.datasets")

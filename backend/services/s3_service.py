@@ -141,3 +141,52 @@ async def delete_file_from_s3(s3_key: str) -> bool:
             return False
             
     return await asyncio.to_thread(_delete)
+
+async def upload_chunks_to_s3(chunks: list, dataset_id: str) -> str:
+    """Upload list of chunk dicts as a JSON file to AWS S3."""
+    import json
+    import asyncio
+    
+    client = get_s3_client()
+    if client is None:
+        raise Exception("AWS S3 storage is not configured or failed to initialize.")
+        
+    bucket = settings.AWS_S3_BUCKET
+    key = f"datasets/{dataset_id}/chunks.json"
+    
+    # Serialize chunks list to json bytes
+    chunks_json = json.dumps(chunks, default=str)
+    chunks_bytes = chunks_json.encode('utf-8')
+    
+    def _upload():
+        logger.info(f"Uploading chunks JSON to S3 bucket '{bucket}' as key '{key}'...")
+        client.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=chunks_bytes,
+            ContentType="application/json"
+        )
+        return key
+        
+    return await asyncio.to_thread(_upload)
+
+async def delete_chunks_from_s3(dataset_id: str) -> bool:
+    """Delete chunks JSON from AWS S3."""
+    import asyncio
+    client = get_s3_client()
+    if client is None:
+        logger.warning("S3 client not initialized; cannot delete chunks JSON.")
+        return False
+    bucket = settings.AWS_S3_BUCKET
+    key = f"datasets/{dataset_id}/chunks.json"
+    
+    def _delete():
+        logger.info(f"Deleting chunks key '{key}' from S3 bucket '{bucket}'...")
+        try:
+            client.delete_object(Bucket=bucket, Key=key)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete chunks key '{key}' from S3: {e}")
+            return False
+            
+    return await asyncio.to_thread(_delete)

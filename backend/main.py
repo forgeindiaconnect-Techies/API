@@ -482,18 +482,24 @@ async def test_gemini():
         )
         
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        from google import genai
+        client = genai.Client(api_key=settings.GEMINI_API_KEY)
         
         # Test content generation with a very small prompt
         import asyncio
         try:
-            res = await model.generate_content_async("Respond with exactly: 'Gemini is connected!'")
+            res = await client.aio.models.generate_content(
+                model="gemini-2.5-flash",
+                contents="Respond with exactly: 'Gemini is connected!'"
+            )
             text = res.text.strip()
         except Exception as async_err:
             logger.warning(f"Async test failed: {async_err}. Trying sync fallback...")
-            res = await asyncio.to_thread(model.generate_content, "Respond with exactly: 'Gemini is connected!'")
+            res = await asyncio.to_thread(
+                client.models.generate_content,
+                model="gemini-2.5-flash",
+                contents="Respond with exactly: 'Gemini is connected!'"
+            )
             text = res.text.strip()
             
         return {
