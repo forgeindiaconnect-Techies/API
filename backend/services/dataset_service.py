@@ -1006,8 +1006,9 @@ async def build_index_for_dataset(dataset_doc: dict, db) -> str:
         return index_id
 
     try:
-        # Wrap execution in a 10-minute (600s) timeout
-        res_idx = await asyncio.wait_for(do_indexing(), timeout=600.0)
+        # Wrap execution in a configurable timeout (default 1 hour / 3600s to handle massive datasets on CPU)
+        indexing_timeout = float(os.environ.get("INDEXING_TIMEOUT_SECONDS", "3600.0"))
+        res_idx = await asyncio.wait_for(do_indexing(), timeout=indexing_timeout)
         return res_idx
     except Exception as e:
         import traceback
